@@ -14,6 +14,7 @@
 | `<id>/change.diff` | clean case: the commit itself, non-test `.go` files only |
 | `<id>/base/` | every file the diff touches at the PR's base: the fix commit minus comments the fix added (bug case), or the commit's parent (clean case) |
 | `licences/` | upstream licence text for each OSS repo, copied for attribution |
+| `coderabbit-map.json` | case id → number in the CodeRabbit sandbox (item 6); kept only here, never in the sandbox |
 | `build.sh` | rebuilds everything from the commit list in it (needs network) |
 
 ## How a case is made

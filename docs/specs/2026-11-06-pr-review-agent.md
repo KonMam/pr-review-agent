@@ -85,7 +85,7 @@ One item per session and PR.
 - [x] 4. **Multi-stage pipeline:** grade, dedup and suppress, each toggleable, plus the threshold sweep and the ablation table. Results are in the Pipeline section below.
 - [x] 4a. **Clean cases:** 20 bug-free commits added to the golden set so false positives are measurable, the scorer's false-positive rate, and item 4's ablation and sweep rerun on the combined set. Results are in the Clean cases section below.
 - [x] 5. **Model ladder:** rerun the best pipeline on 2-3 arms from cheapest to stronger, to see whether a stronger model buys enough precision or recall to justify its cost. Also try read-only tools as an ablation. Results are in the Model ladder section below; the strong tier didn't fit the budget and has an estimate instead.
-- [ ] 6. **CodeRabbit arm:** a public sandbox GitHub repo with one PR per case. Collect CodeRabbit's comments, normalise them to findings, and score them. **This needs my OK before any remote is created or anything is pushed.**
+- [x] 6. **CodeRabbit arm:** a public sandbox GitHub repo with one PR per case. Collect CodeRabbit's comments, normalise them to findings, and score them. **This needs my OK before any remote is created or anything is pushed.** Results are in the CodeRabbit section below.
 - [ ] 7. **`docs/build-vs-buy.md`:** the comparison table, the hand-check results, and the recommendation.
 - [ ] 8. **CI on one Go repo:** a GitHub Action, defined in this repo, that reviews a Go repo's PRs with inline comments. This is the "would I actually use it" check. It runs on one of my Go repos, and wiring it in there **needs my OK first**, since it touches an existing project. One repo only.
   - Every CI review also writes a JSONL log of each posted finding and uploads it as a workflow artifact. Each record has repo, PR number, head SHA, file, line range, category, claim, arm/model id, prompt and stage versions, and grade score if graded. This is the input to item 9, so it ships from the first CI run.
@@ -257,6 +257,67 @@ The tools read an offline snapshot of the repo at base. `pr-review snapshot` bui
 - **Routing makes cost per review hard to predict.** `data_collection = "deny"` plus a quantization filter can route to hosts several times the list price. GLM's probe paid ~5× the cheapest host, and V4 Pro reviews ranged from $0.0017 to $0.09. `provider.max_price` pins a ceiling. The budget guard's worst case (2× list, full `max_tokens`) also refuses very large prompts near the end of a budget: nats-clean's 56k-token prompt reserved $0.41.
 - **Request timeouts abort a run.** One tools review hit the 180 s client timeout on its retry, which stopped the whole eval; rerunning used the cache. A per-request timeout retry is a possible follow-up.
 
+## CodeRabbit (item 6)
+
+Run 2026-11-06 on a public sandbox, https://github.com/KonMam/pr-review-sandbox (left up for the owner to archive). There is **1 run per case**, against 3 for the agent rows. No OpenRouter calls were made.
+
+**Sandbox** (`python -m pr_review.coderabbit build|push|open-prs|trigger|collect|score`; code in `sandbox.py` and `coderabbit.py`):
+- **Branches.** Each of the 61 cases (41 bug + 20 clean, including the 3 go-taskqueue cases, since that repo is public) has two branches:
+  - `base/case-NNN` is one parentless commit holding the case's offline snapshot (item 5's non-test `.go` files at base, with the case's `base/` files laid over them, so fix-added comments stay out), the upstream `LICENSE`, and `.coderabbit.yaml`.
+  - `case/case-NNN` is that commit plus the case diff, as one commit.
+- **PRs.** One PR per case, from `case/` into `base/`, never merged. File paths match the golden set, so no line mapping is needed. `main` holds only a README that lists the 15 source repos and their licences.
+- **Neutral by construction.**
+  - Case numbers are a seeded shuffle of the case ids.
+  - Every commit has the same author, committer and date (2026-01-01).
+  - Branch names, commit messages and PR titles come from fixed templates ("Case 017"), and every PR has the same description.
+  - The number ↔ case-id mapping is only in `cases/coderabbit-map.json`, which is in this repo and not in the sandbox.
+- **Leakage check.** `sandbox.check_repo` runs before every push and found 0 problems. It rejects test files, vendor/testdata, any non-Go file other than LICENSE and the config, history, non-template names, messages or identities, and any case id or upstream SHA in branch names, commit messages or the README (file contents are upstream code and aren't scanned). `check-prs` found 0 problems in the PR titles and descriptions. Both are unit-tested on fixtures in `./verify.sh`.
+- **Settings: default review settings.**
+  - Profile `chill`, with the built-in tools and linters left on.
+  - `.coderabbit.yaml` only turns off extras that aren't findings: poem, sequence diagrams, related issues and PRs, suggested labels and reviewers, the effort estimate, the in-progress fortune, and docstring and unit-test generation.
+  - It also sets `auto_review.base_branches: ["base/.*"]`, because the PRs don't target `main`.
+
+**Limits and how they played out.**
+- **What the docs say** (read 2026-11-06): public repos are on the OSS plan, with 1-10 PR reviews per hour per developer depending on star count. Repos with under 10 stars need a manual `@coderabbitai review`. Reviews cover 100-300 files.
+- **What happened:**
+  - Installing the app put the account on a trial of the **Advanced** plan (10 reviews an hour), so every PR was reviewed automatically on open and no manual requests were needed.
+  - By about the 11th PR the review bodies said all 10 included reviews were used, yet all 61 reviews still ran.
+  - The docs say trial overage is free, and no payment method was added. **The owner should check CodeRabbit's billing page shows no usage charge, and turn off pay-as-you-go before the trial ends.**
+- All 61 PRs were opened within 6 minutes, so latency includes CodeRabbit's queueing.
+
+**Normalising.**
+- A finding is a top-level inline review comment by `coderabbitai[bot]` at its line range, or a located entry in the review body.
+- The walkthrough comment and the summary CodeRabbit appends to the PR description are ignored.
+- CodeRabbit no longer uses "Potential issue" / "Refactor suggestion" / "Nitpick" labels. Each comment starts with a badge line instead: severity · category · effort, e.g. `Major · Stability & Availability · Quick win`.
+- So the two cuts are **all comments**, and **Major or Critical only**, the closest thing to "potential issues only". No nitpicks appeared under `chill`.
+- Raw JSON is under `results/coderabbit/raw/`, normalised findings in `results/coderabbit/findings.json`, and the summary in `results/coderabbit/summary.json`.
+
+**Results** (same scorer; the flash rows are item 5's, on 60 cases × 3 runs, mean; CodeRabbit is on the same 60 cases, 1 run; latency is PR open → review posted for CodeRabbit, and per review for flash):
+
+| Row | Combined P | Bug-only P | Recall | F1 | FP/clean review | Clean flagged | Cost/review | p50 / p95 |
+|---|---|---|---|---|---|---|---|---|
+| flash: single-pass + dedup + suppress | 0.958 | 0.993 | 0.787 | 0.864 | 0.088 | 0.070 | $0.0043 | 15.2 s / 61.0 s |
+| flash: + read-only tools | 0.978 | 0.993 | 0.787 | 0.872 | 0.035 | 0.035 | $0.0067 | 19.2 s / 80.7 s |
+| CodeRabbit, all comments | 0.698 | 0.902 | 0.621 | 0.657 | 0.632 | 0.526 | $0 (trial) | 165 s / 306 s |
+| CodeRabbit, Major or Critical only | 0.810 | 0.944 | 0.569 | 0.668 | 0.316 | 0.316 | $0 (trial) | same |
+
+The CodeRabbit rows come from `score --exclude nats-clean-b5bc7b4 --out summary-60.json`. On all 61 cases (`summary.json`), the all-comments row is P 0.673, FP/clean 0.700 and clean flagged 0.550, and p95 latency is 358 s. `nats-clean-b5bc7b4` drew 2 Minor comments, and the other figures are unchanged.
+
+**Reading it:**
+- **CodeRabbit finds fewer of the bugs and flags far more clean code.**
+  - It hit 36 of 58 bugs (all comments), against flash's 0.787 mean.
+  - 11 of the 20 clean PRs drew at least one comment: 14 comments in all, 6 of them Major. Flash averaged 0.088 per clean review.
+- **On bug PRs its comments are mostly on target.** 37 of 41 hit a bug, so bug-only P is 0.902. Its precision problem is clean PRs, which is the false-positive rate a team would actually see.
+- **Its own severity is a useful filter.** Keeping Major/Critical halves the clean false positives (0.632 → 0.316) and costs 3 bugs of recall. That still leaves it below flash on every quality column.
+- **Out-of-diff comments matter.** 8 bug cases are pure deletions (the revert only removes the fix), and CodeRabbit says the file has "no reviewable changes". Even so, on 7 of them it left an "Outside diff range" comment in the review body, and all 7 hit the bug. Scoring only inline comments would drop recall to 29/58.
+- **Comment mix.** 55 comments: 41 Major, 13 Minor, 1 Critical. By category: 36 Stability & Availability, 11 Functional Correctness, 5 Data Integrity, and 1 each for maintainability, performance and security. One clean-case comment was marked "Unverified finding".
+- **Caveats:**
+  - 1 run, so there's no run-to-run spread.
+  - The trial plan is Advanced, not the free OSS plan a public repo would normally get.
+  - Latency includes queueing from opening 61 PRs at once.
+  - CodeRabbit's pre-merge "title check" flagged every generic "Case NNN" title. That's a check, not a finding, and wasn't scored.
+- Item 7 should hand-check 20 sampled CodeRabbit true positives too, and its clean-case comments.
+
 ## Decisions
 
 - **Model access: OpenRouter, behind config-defined arms. The Anthropic API is rejected for now.**
@@ -296,4 +357,5 @@ The tools read an offline snapshot of the repo at base. `pr-review snapshot` bui
 - **Are my own repos public?** The CodeRabbit sandbox would republish their code. If they're private, own-repo cases run on the agent arm only.
   - *Answered in item 2 (`gh repo view`, 2026-11-06):* go-taskqueue and duckserve are public; gbemu, dagr and dungeon are private. All 3 own-repo cases are from go-taskqueue, so all of them can go to the CodeRabbit sandbox. The owner then accepted 3 own-repo cases (see Decisions), so this is closed.
 - **CodeRabbit's free-tier limits** (rate, PR size) on a sandbox with 30-50 PRs. Check them in item 6 before building the case-to-PR script.
+  - *Answered in item 6:* the docs give 1-10 reviews an hour on the OSS plan by star count, manual triggers under 10 stars, and 100-300 files per review. In practice the account got an Advanced trial, which reviewed all 61 PRs on open. See the CodeRabbit section.
 - **OpenRouter privacy settings.** Exclude providers that train on or retain prompts before sending any code. That's fine for public OSS and my own code, but not for anyone else's.
