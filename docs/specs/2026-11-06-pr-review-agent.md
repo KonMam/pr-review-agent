@@ -84,7 +84,7 @@ One item per session and PR.
 - **Model access: OpenRouter, behind config-defined arms. The Anthropic API is rejected for now.**
   - There are no Anthropic API credits; only a seat licence, which doesn't cover API use from my own code.
   - Models have to be swappable fast. OpenRouter gives one OpenAI-compatible endpoint across providers, one key for this project with a monthly limit, and a small prepaid balance with auto top-up off, which makes the balance a hard ceiling. It also reports cost per request.
-  - Local Ollama (`qwen3.5:9b`) is a free arm for smoke tests, not for scored runs.
+  - Local Ollama (`gemma4:e4b-it-qat`) is a free arm for smoke tests, not for scored runs. It's the fast, reliable one on the owner's M1 Pro (~30 tok/s decode, every JSON-extraction task right); `qwen3.5:9b` stalls for minutes on long prompts. A smoke run is 1-2 small cases, 1 run, a 120s per-request timeout and capped output, run by hand. Local models are never part of `./verify.sh` or the unit tests, and never run on the full golden set.
   - DeepSeek direct, with the existing key, is a fallback arm.
   - This follows the personal gateway decision doc, which also rejects a standing LiteLLM.
 - **Start on the cheapest tier.** The first baseline uses a cheap-tier model, such as DeepSeek V4.1 Flash, for both generate and grade.

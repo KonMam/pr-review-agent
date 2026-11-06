@@ -1,0 +1,79 @@
+import re
+from pathlib import Path
+
+import pytest
+
+from pr_review.arms import ArmsError, load_arm, load_arms
+
+REPO_ARMS = Path(__file__).parent.parent / "arms.toml"
+
+
+def write(tmp_path: Path, text: str) -> Path:
+    path = tmp_path / "arms.toml"
+    path.write_text(text)
+    return path
+
+
+def test_repo_arms_file_loads() -> None:
+    arms = load_arms(REPO_ARMS)
+    assert {"ollama-gemma", "or-deepseek-flash", "deepseek-direct"} <= set(arms)
+    assert arms["or-deepseek-flash"].extra_body["provider"] == {
+        "data_collection": "deny"
+    }
+
+
+def test_loads_arm_with_defaults(tmp_path: Path) -> None:
+    path = write(
+        tmp_path,
+        '[arms.a]\nbase_url = "http://x/v1"\napi_key_env = "K"\nmodel = "m"\n'
+        "price = { input_per_mtok = 1, output_per_mtok = 2 }\n",
+    )
+    arm = load_arm(path, "a")
+    assert arm.name == "a" and arm.model == "m" and arm.json_mode
+    assert arm.price is not None and arm.price.cost(1_000_000, 500_000) == 2.0
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("", "no [arms.<name>] tables"),
+        ("[arms.a\n", "invalid TOML"),
+        (
+            '[arms.a]\nbase_url = "u"\napi_key_env = "K"\nmodel = "m"\n',
+            "set `price` or `reports_cost = true`",
+        ),
+        (
+            (
+                '[arms.a]\nbase_url = "u"\napi_key_env = "K"\nmodel = "m"\n'
+                "reports_cost = true\ntypo = 1\n"
+            ),
+            "typo",
+        ),
+    ],
+)
+def test_rejects_bad_arms(tmp_path: Path, text: str, expected: str) -> None:
+    with pytest.raises(ArmsError, match=re.escape(expected)):
+        load_arms(write(tmp_path, text))
+
+
+def test_unknown_arm_names_known_ones(tmp_path: Path) -> None:
+    with pytest.raises(
+        ArmsError, match="no arm .nope.; known: deepseek-direct, ollama-gemma"
+    ):
+        load_arm(REPO_ARMS, "nope")
+
+
+def test_config_hash_ignores_name_and_price_only(tmp_path: Path) -> None:
+    base = '[arms.{n}]\nbase_url = "u"\napi_key_env = "K"\nmodel = "{m}"\n'
+    path = write(
+        tmp_path,
+        base.format(n="a", m="m")
+        + "reports_cost = true\n"
+        + base.format(n="b", m="m")
+        + "price = { input_per_mtok = 1, output_per_mtok = 2 }\n"
+        + base.format(n="c", m="other")
+        + "reports_cost = true\n",
+    )
+    arms = load_arms(path)
+    assert arms["a"].config_hash() == arms["b"].config_hash()
+    assert arms["a"].config_hash() != arms["c"].config_hash()

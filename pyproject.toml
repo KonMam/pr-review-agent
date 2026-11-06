@@ -1,13 +1,14 @@
 [project]
 name = "pr-review"
 version = "0.1.0"
-description = "Add your description here"
+description = "Precision-first PR reviewer for Go, with an offline eval"
 readme = "README.md"
 authors = [
     { name = "Konstantinas Mamonas", email = "k.mamonas@gmail.com" }
 ]
 requires-python = ">=3.13"
 dependencies = [
+    "openai>=3.46.0",
     "pydantic>=2.14.3",
 ]
 
@@ -21,3 +22,6 @@ dev = [
     "pytest>=9.2.0",
     "ruff>=0.17.4",
 ]
+
+[project.scripts]
+pr-review = "pr_review.cli:main"

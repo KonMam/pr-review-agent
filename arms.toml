@@ -1,0 +1,37 @@
+# Model arms. Swapping a model, or moving a stage to another provider, is an
+# edit here and nothing else. Each arm needs `price` (USD per million tokens) or
+# `reports_cost = true` so the budget guard can count spend.
+
+# Free local smoke arm: 1-2 small cases, --runs 1, opt-in and manual only.
+# Never in verify.sh or tests (those use the stub server), never the full set.
+# gemma4:e4b-it-qat, not qwen3.5:9b: on the owner's M1 Pro it decodes ~30 tok/s
+# and got every JSON-extraction task right; qwen3.5:9b stalls for minutes on
+# long prompts.
+[arms.ollama-gemma]
+base_url = "http://localhost:11434/v1"
+api_key_env = "OLLAMA_API_KEY"   # Ollama ignores the key; set it to anything
+model = "gemma4:e4b-it-qat"
+price = { input_per_mtok = 0, output_per_mtok = 0 }
+temperature = 0.2
+timeout_s = 120
+max_tokens = 1024
+
+# Cheapest-tier baseline. OpenRouter reports cost per request (usage.cost).
+# data_collection = "deny" keeps requests off providers that train on or
+# retain prompts; check the account's privacy settings agree before a paid run.
+[arms.or-deepseek-flash]
+base_url = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_API_KEY"
+model = "deepseek/deepseek-v4.1-flash"
+reports_cost = true
+price = { input_per_mtok = 0.051, output_per_mtok = 0.567 }  # fallback, 2026-11-06 list price
+temperature = 0.2
+extra_body = { provider = { data_collection = "deny" }, usage = { include = true } }
+
+# Fallback: DeepSeek direct with the existing key.
+[arms.deepseek-direct]
+base_url = "https://api.deepseek.com/v1"
+api_key_env = "DEEPSEEK_API_KEY"
+model = "deepseek-chat"
+price = { input_per_mtok = 0.28, output_per_mtok = 0.42 }  # check against DeepSeek's pricing page before use
+temperature = 0.2
