@@ -8,14 +8,24 @@ description: >-
 #   permissions: { contents: read, pull-requests: write }
 # The OpenRouter key comes from a repo secret and is only ever passed as an env
 # var to the review step. Fork PRs get no secrets, so the review is skipped.
+# Reviews post as github-actions[bot] unless a GitHub App's client id and
+# private key are given: then they post as that App (docs/github-app.md).
 
 inputs:
   openrouter-api-key:
     description: OpenRouter API key (pass a repo secret)
     required: true
   github-token:
-    description: token that may write PR reviews
+    description: token that may write PR reviews; unused when the App inputs are set
     default: ${{ github.token }}
+  app-client-id:
+    description: >-
+      GitHub App client id (pass a secret). With app-private-key, reviews post as
+      that App instead of github-actions[bot].
+    default: ""
+  app-private-key:
+    description: GitHub App private key (pass a secret)
+    default: ""
   arm:
     description: arm in this action's arms.toml
     default: or-deepseek-flash
@@ -43,9 +53,14 @@ runs:
       env:
         KEY: ${{ inputs.openrouter-api-key }}
         EVENT: ${{ github.event_name }}
+        HAS_APP_ID: ${{ inputs.app-client-id != '' }}
+        HAS_APP_KEY: ${{ inputs.app-private-key != '' }}
       run: |
         if [ "$EVENT" != "pull_request" ]; then
           echo "::error::pr-review runs on pull_request events only"; exit 1
+        fi
+        if [ "$HAS_APP_ID" != "$HAS_APP_KEY" ]; then
+          echo "::error::set both app-client-id and app-private-key, or neither"; exit 1
         fi
         if [ -z "$KEY" ]; then
           echo "::notice::OPENROUTER_API_KEY is empty (not set, or a fork PR); skipping the review"
@@ -53,6 +68,17 @@ runs:
         else
           echo "enabled=true" >> "$GITHUB_OUTPUT"
         fi
+
+    - name: Mint a GitHub App token
+      if: steps.check.outputs.enabled == 'true' && inputs.app-client-id != ''
+      id: app-token
+      uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+      with:
+        client-id: ${{ inputs.app-client-id }}
+        private-key: ${{ inputs.app-private-key }}
+        # This repository only, and only what posting a review needs.
+        permission-pull-requests: write
+        permission-contents: read
 
     - name: Check out the PR head
       if: steps.check.outputs.enabled == 'true'
@@ -109,7 +135,8 @@ runs:
       id: post
       shell: bash
       env:
-        GITHUB_TOKEN: ${{ inputs.github-token }}
+        # The App's token when one was minted, else today's github-token.
+        GITHUB_TOKEN: ${{ steps.app-token.outputs.token || inputs.github-token }}
         REPO: ${{ github.repository }}
         PR: ${{ github.event.pull_request.number }}
         HEAD_SHA: ${{ github.event.pull_request.head.sha }}
