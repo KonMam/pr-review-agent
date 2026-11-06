@@ -5,10 +5,12 @@ import sys
 from pathlib import Path
 
 from pr_review.arms import ArmsError, load_arm
-from pr_review.evaluate import DEFAULT_CONCURRENCY, run_eval
+from pr_review.evaluate import DEFAULT_CONCURRENCY, base_dir, run_eval
 from pr_review.llm import DEFAULT_BUDGET_USD, Budget, BudgetExceeded, CostUnknown
 from pr_review.manifest import ManifestError, load_manifest
+from pr_review.snapshot import build_snapshot, clone_dir
 from pr_review.stages import DEFAULT_THRESHOLD, Stage
+from pr_review.tools import DEFAULT_MAX_TURNS
 
 
 def _stages(value: str) -> list[Stage]:
@@ -77,7 +79,38 @@ def main(argv: list[str] | None = None) -> int:
         default=DEFAULT_THRESHOLD,
         help=f"drop candidates graded below this (default {DEFAULT_THRESHOLD})",
     )
+    ev.add_argument(
+        "--tools",
+        action="store_true",
+        help="ablation: let the generator call read-only tools (read_file, grep) "
+        "on the case's offline snapshot (see `pr-review snapshot`)",
+    )
+    ev.add_argument("--snapshots-dir", type=Path, default=Path("cache/snapshots"))
+    ev.add_argument(
+        "--max-tool-turns",
+        type=int,
+        default=DEFAULT_MAX_TURNS,
+        help=f"turns that may call tools before the answer (default {DEFAULT_MAX_TURNS})",
+    )
+    sn = sub.add_parser(
+        "snapshot",
+        help="build offline repo snapshots at each case's base for --tools "
+        "(reads local clones; no network)",
+    )
+    sn.add_argument("--manifest", type=Path, default=Path("cases/manifest.jsonl"))
+    sn.add_argument("--root", type=Path, default=Path("."))
+    sn.add_argument("--repos-dir", type=Path, default=Path("cache/repos"))
+    sn.add_argument(
+        "--own-dir",
+        type=Path,
+        default=Path.home() / "projects",
+        help="where the owner's repos are cloned (read only)",
+    )
+    sn.add_argument("--out", type=Path, default=Path("cache/snapshots"))
     args = parser.parse_args(argv)
+
+    if args.command == "snapshot":
+        return _snapshot(args)
 
     try:
         arm = load_arm(args.arms_file, args.arm)
@@ -105,6 +138,9 @@ def main(argv: list[str] | None = None) -> int:
             "without --stages grade",
             file=sys.stderr,
         )
+    if args.max_tool_turns < 1:
+        print("error: --max-tool-turns must be positive", file=sys.stderr)
+        return 2
     if not 0 <= args.grade_threshold <= 1:
         print("error: --grade-threshold must be in [0, 1]", file=sys.stderr)
         return 2
@@ -123,7 +159,12 @@ def main(argv: list[str] | None = None) -> int:
             stages=args.stages,
             grade_arm=grade_arm,
             threshold=args.grade_threshold,
+            snapshots_dir=args.snapshots_dir if args.tools else None,
+            max_tool_turns=args.max_tool_turns,
         )
+    except FileNotFoundError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
     except BudgetExceeded as e:
         print(
             f"stopped: {e}. Paid replies are cached; rerun with a larger "
@@ -135,6 +176,22 @@ def main(argv: list[str] | None = None) -> int:
         print(f"stopped: {e}", file=sys.stderr)
         return 3
     print(summary)
+    return 0
+
+
+def _snapshot(args: argparse.Namespace) -> int:
+    try:
+        cases = load_manifest(args.manifest)
+    except (ManifestError, OSError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    for case in cases:
+        clone = clone_dir(case.provenance.repo, args.repos_dir, args.own_dir)
+        if not clone.is_dir():
+            print(f"error: {case.id}: no clone at {clone}", file=sys.stderr)
+            return 2
+        n = build_snapshot(case, clone, base_dir(case, args.root), args.out / case.id)
+        print(f"{case.id}: {n} files")
     return 0
 
 

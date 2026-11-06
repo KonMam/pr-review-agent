@@ -1,5 +1,6 @@
 """One chat call to an arm, with its cost, and the budget guard every call goes through."""
 
+import json
 import os
 import random
 import threading
@@ -124,6 +125,15 @@ class Budget:
 
 
 @dataclass(frozen=True)
+class ToolCall:
+    """One function call the model asked for: its id, name and raw JSON arguments."""
+
+    id: str
+    name: str
+    arguments: str
+
+
+@dataclass(frozen=True)
 class Reply:
     content: str
     prompt_tokens: int
@@ -134,6 +144,10 @@ class Reply:
     retry_wait_s: float = 0.0  # failed attempts plus backoff, kept apart
     finish_reason: str = ""  # "length" when the reply hit max_tokens
     reasoning_tokens: int = 0  # hidden reasoning, counted in completion_tokens
+    tool_calls: tuple[ToolCall, ...] = ()
+    # Provider reasoning blocks (OpenRouter's `reasoning_details`), sent back
+    # with the assistant turn in a tool loop so reasoning models keep context.
+    reasoning_details: tuple[Any, ...] = ()
 
 
 def make_client(arm: Arm) -> OpenAI:
@@ -152,19 +166,33 @@ def make_client(arm: Arm) -> OpenAI:
 
 
 def worst_case_cost(
-    arm: Arm, messages: list[ChatCompletionMessageParam]
+    arm: Arm,
+    messages: list[ChatCompletionMessageParam],
+    tools: list[dict[str, Any]] | None = None,
 ) -> float | None:
     """An upper bound on one call's cost, or None if the arm has no price.
 
-    Prompt tokens are bounded by content bytes (a token is at least one byte)
+    Prompt tokens are bounded by content bytes (a token is at least one byte),
+    plus the bytes of any tool calls and reasoning blocks in the history and of
+    the tool schemas,
     and completion tokens by `max_tokens`.
     """
     if arm.price is None:
         return None
     prompt_bound = sum(
-        len(str(m.get("content") or "").encode()) + _MESSAGE_OVERHEAD_TOKENS
+        len(str(m.get("content") or "").encode())
+        + (len(json.dumps(calls).encode()) if (calls := m.get("tool_calls")) else 0)
+        # Reasoning blocks sent back in a tool loop are billed as input too.
+        + (
+            len(json.dumps(blocks).encode())
+            if (blocks := m.get("reasoning_details"))
+            else 0
+        )
+        + _MESSAGE_OVERHEAD_TOKENS
         for m in messages
     )
+    if tools:
+        prompt_bound += len(json.dumps(tools).encode())
     cost = arm.price.cost(prompt_bound, arm.max_tokens)
     return cost * REPORTED_COST_MARGIN if arm.reports_cost else cost
 
@@ -176,12 +204,16 @@ def chat(
     budget: Budget,
     *,
     extra_body: dict[str, Any] | None = None,
+    tools: list[dict[str, Any]] | None = None,
+    tool_choice: str | None = None,
 ) -> Reply:
     """Send one chat request within a budget reservation, retrying 429 and 5xx.
 
     `extra_body` replaces the arm's `extra_body` for this request only.
+    `tools` (OpenAI function schemas) turns off JSON mode for the request:
+    providers differ on combining the two, and the prompt asks for JSON anyway.
     """
-    reserved = budget.reserve(worst_case_cost(arm, messages))
+    reserved = budget.reserve(worst_case_cost(arm, messages, tools))
     try:
         reply = _send(
             client,
@@ -189,6 +221,8 @@ def chat(
             messages,
             budget.cancelled,
             arm.extra_body if extra_body is None else extra_body,
+            tools,
+            tool_choice,
         )
     except (APIStatusError, Cancelled):
         # The provider refused the request, or we never resent it: not billed.
@@ -209,11 +243,17 @@ def _send(
     messages: list[ChatCompletionMessageParam],
     cancelled: threading.Event,
     extra_body: dict[str, Any],
+    tools: list[dict[str, Any]] | None = None,
+    tool_choice: str | None = None,
 ) -> Reply:
     options: dict[str, Any] = {}
     if arm.temperature is not None:
         options["temperature"] = arm.temperature
-    if arm.json_mode:
+    if tools:
+        options["tools"] = tools
+        if tool_choice is not None:
+            options["tool_choice"] = tool_choice
+    elif arm.json_mode:
         options["response_format"] = {"type": "json_object"}
     if extra_body:
         options["extra_body"] = extra_body
@@ -238,9 +278,18 @@ def _send(
     prompt_tokens = usage.prompt_tokens if usage else 0
     completion_tokens = usage.completion_tokens if usage else 0
     cost = _cost(arm, usage, prompt_tokens, completion_tokens)
-    content = resp.choices[0].message.content if resp.choices else None
+    message = resp.choices[0].message if resp.choices else None
+    content = message.content if message else None
     finish_reason = (resp.choices[0].finish_reason or "") if resp.choices else ""
     details = usage.completion_tokens_details if usage else None
+    calls = tuple(
+        ToolCall(id=c.id, name=c.function.name, arguments=c.function.arguments or "")
+        for c in (message.tool_calls or [] if message else [])
+        if c.type == "function"
+    )
+    reasoning_details = (
+        (message.model_extra or {}).get("reasoning_details") if message else None
+    )
     return Reply(
         content=content or "",
         prompt_tokens=prompt_tokens,
@@ -251,6 +300,10 @@ def _send(
         retry_wait_s=started - first_started if retries else 0.0,
         finish_reason=finish_reason,
         reasoning_tokens=(details.reasoning_tokens or 0) if details else 0,
+        tool_calls=calls,
+        reasoning_details=tuple(reasoning_details)
+        if isinstance(reasoning_details, list)
+        else (),
     )
 
 

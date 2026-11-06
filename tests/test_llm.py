@@ -1,3 +1,5 @@
+import json
+
 """The budget's reservations, shared between threads."""
 
 import threading
@@ -114,3 +116,25 @@ def test_worst_case_counts_bytes_overhead_and_max_tokens() -> None:
     )
     unpriced = arm(price=None, reports_cost=True)
     assert worst_case_cost(unpriced, messages) is None  # type: ignore[arg-type]
+
+
+def test_worst_case_counts_tool_calls_reasoning_and_schemas() -> None:
+    calls = [
+        {"id": "c", "type": "function", "function": {"name": "f", "arguments": "{}"}}
+    ]
+    blocks = [{"type": "reasoning.text", "text": "x" * 1000}]
+    tools = [{"type": "function", "function": {"name": "f"}}]
+    plain = [{"role": "assistant", "content": ""}]
+    turn = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": calls,
+            "reasoning_details": blocks,
+        }
+    ]
+    extra = len(json.dumps(calls)) + len(json.dumps(blocks)) + len(json.dumps(tools))
+    base = worst_case_cost(arm(), plain)  # type: ignore[arg-type]
+    full = worst_case_cost(arm(), turn, tools)  # type: ignore[arg-type]
+    assert base is not None and full is not None
+    assert full - base == pytest.approx(extra * 1.0 / 1_000_000)

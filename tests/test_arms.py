@@ -105,3 +105,30 @@ def test_repo_openrouter_arms_send_attribution_headers() -> None:
             "HTTP-Referer": "https://github.com/KonMam/pr-review-agent",
             "X-OpenRouter-Title": "pr-review-agent",
         }
+
+
+def test_repo_openrouter_arms_deny_data_collection_and_report_cost() -> None:
+    """Every paid OpenRouter arm, the ladder included, keeps prompts off
+    providers that store or train on them, and has a fallback price."""
+    openrouter = {
+        n: a for n, a in load_arms(REPO_ARMS).items() if "openrouter.ai" in a.base_url
+    }
+    assert {"or-deepseek-flash", "or-deepseek-pro", "or-glm", "or-sonnet"} <= set(
+        openrouter
+    )
+    for name, arm in openrouter.items():
+        assert arm.extra_body["provider"]["data_collection"] == "deny", name
+        assert arm.extra_body["usage"] == {"include": True}, name
+        assert arm.reports_cost and arm.price is not None, name
+
+
+def test_repo_ladder_arms_hash_apart() -> None:
+    arms = load_arms(REPO_ARMS)
+    names = [
+        "or-deepseek-flash",
+        "or-deepseek-pro",
+        "or-glm",
+        "or-sonnet",
+        "or-gpt-sol",
+    ]
+    assert len({arms[n].config_hash() for n in names}) == len(names)

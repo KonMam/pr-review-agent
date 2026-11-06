@@ -47,6 +47,12 @@ from pr_review.stages import (
     apply,
     is_suppressed,
 )
+from pr_review.tools import (
+    DEFAULT_MAX_TURNS,
+    RepoTools,
+    generate_with_tools,
+    tools_version,
+)
 
 STAGE = f"generate-{PROMPT_VERSION}"
 # Grade thresholds the sweep tries; the spec asks for one chosen for precision.
@@ -72,6 +78,8 @@ class CachedReview(BaseModel):
     retry_wait_s: float = 0.0  # their failed attempts and backoff, not in latency_s
     truncated: int = 0  # attempts cut off at max_tokens
     reasoning_tokens: int = 0
+    calls: int = 0  # model calls with the tool loop; 0 without it
+    tool_calls: int = 0
 
     @classmethod
     def from_result(
@@ -91,6 +99,8 @@ class CachedReview(BaseModel):
             retry_wait_s=r.retry_wait_s,
             truncated=r.truncated,
             reasoning_tokens=r.reasoning_tokens,
+            calls=r.calls,
+            tool_calls=r.tool_calls,
         )
 
 
@@ -186,18 +196,31 @@ class Cache:
         return p / f"run-{run_index}.json"
 
     def get(
-        self, case_id: str, review: ReviewInput, arm: Arm, stage: str, run_index: int
+        self,
+        case_id: str,
+        review: ReviewInput,
+        arm: Arm,
+        stage: str,
+        run_index: int,
+        extra: str = "",
     ) -> CachedReview | None:
-        p = self.path(case_id, review, arm, stage, run_index)
+        p = self.path(case_id, review, arm, stage, run_index, extra)
         if not p.exists():
             return None
         return CachedReview.model_validate_json(p.read_text(encoding="utf-8"))
 
     def put(
-        self, review_input: ReviewInput, arm: Arm, stage: str, review: CachedReview
+        self,
+        review_input: ReviewInput,
+        arm: Arm,
+        stage: str,
+        review: CachedReview,
+        extra: str = "",
     ) -> None:
         _write(
-            self.path(review.case_id, review_input, arm, stage, review.run_index),
+            self.path(
+                review.case_id, review_input, arm, stage, review.run_index, extra
+            ),
             review,
         )
 
@@ -298,8 +321,14 @@ def run_eval(
     grade_arm: Arm | None = None,
     grade_client: OpenAI | None = None,
     threshold: float = DEFAULT_THRESHOLD,
+    snapshots_dir: Path | None = None,
+    max_tool_turns: int = DEFAULT_MAX_TURNS,
 ) -> Path:
     """Run, score and write `results/<run-id>/`. Returns the summary path.
+
+    `snapshots_dir` turns on the read-only tools ablation: the generator may
+    read and grep `<snapshots_dir>/<case id>/` (see `tools.py`) for up to
+    `max_tool_turns` turns. Its replies are cached under their own stage.
 
     `stages` are the ones after generate (grade, dedup, suppress); none is the
     single-pass reviewer. Only generate and grade call a model; the grader
@@ -317,6 +346,8 @@ def run_eval(
         raise ValueError("no cases")
     if not 0 <= threshold <= 1:
         raise ValueError("threshold must be in [0, 1]")
+    if max_tool_turns < 1:
+        raise ValueError("max_tool_turns must be at least 1")
     stages = [s for s in ORDER if s in stages]
     grading = Stage.GRADE in stages
     grader = grade_arm or arm
@@ -327,12 +358,43 @@ def run_eval(
     cache = Cache(cache_dir)
 
     inputs = {c.id: review_input(c, root) for c in cases}
+    gen_stage = STAGE
+    repos: dict[str, RepoTools] = {}
+    snapshot_key: dict[str, str] = {}
+    if snapshots_dir is not None:
+        gen_stage = f"generate-tools-{tools_version(max_tool_turns)}"
+        for c in cases:
+            d = snapshots_dir / c.id
+            if not d.is_dir():
+                raise FileNotFoundError(
+                    f"{d}: no snapshot for {c.id}; build them with `pr-review snapshot`"
+                )
+            stale = [
+                path
+                for path, text in inputs[c.id].base_files.items()
+                if not (d / path).is_file()
+                or (d / path).read_bytes().decode("utf-8", errors="replace") != text
+            ]
+            if stale:
+                raise FileNotFoundError(
+                    f"{d}: snapshot is out of date with {c.id}'s base/ "
+                    f"({', '.join(stale)}); rebuild it with `pr-review snapshot`"
+                )
+            repos[c.id] = RepoTools(d)
+            snapshot_key[c.id] = repos[c.id].digest()
     keys = [(run_index, case.id) for run_index in range(runs) for case in cases]
 
     def cached(key: tuple[int, str]) -> tuple[CachedReview, CachedGrade | None] | None:
         """Both stages from the cache, or None if any of them must be paid for."""
         run_index, case_id = key
-        gen = cache.get(case_id, inputs[case_id], arm, STAGE, run_index)
+        gen = cache.get(
+            case_id,
+            inputs[case_id],
+            arm,
+            gen_stage,
+            run_index,
+            snapshot_key.get(case_id, ""),
+        )
         if gen is None:
             return None
         if not grading:
@@ -376,13 +438,19 @@ def run_eval(
             run_index, case_id = key
             review_in = inputs[case_id]
             try:
-                gen = cache.get(case_id, review_in, arm, STAGE, run_index)
+                snap = snapshot_key.get(case_id, "")
+                gen = cache.get(case_id, review_in, arm, gen_stage, run_index, snap)
                 if gen is None:
                     with lock:
                         live = client_for(arm)
-                    result = generate(live, arm, review_in, budget)
+                    if repos:
+                        result = generate_with_tools(
+                            live, arm, review_in, budget, repos[case_id], max_tool_turns
+                        )
+                    else:
+                        result = generate(live, arm, review_in, budget)
                     gen = CachedReview.from_result(case_id, run_index, result)
-                    cache.put(review_in, arm, STAGE, gen)
+                    cache.put(review_in, arm, gen_stage, gen, snap)
                 if not grading:
                     return gen, None
                 graded = cache.get_grade(
@@ -447,6 +515,8 @@ def run_eval(
         stages=stages,
         grade_arm=grader if grading else None,
         threshold=threshold,
+        stage=gen_stage,
+        max_tool_turns=max_tool_turns if repos else None,
     )
     path = out_dir / "summary.json"
     path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
@@ -674,6 +744,8 @@ def summarise(
     stages: Sequence[Stage] = (),
     grade_arm: Arm | None = None,
     threshold: float = DEFAULT_THRESHOLD,
+    stage: str = STAGE,
+    max_tool_turns: int | None = None,
 ) -> dict[str, Any]:
     per_run = score_runs(
         cases, [(r.run_index, r.case_id, r.findings) for r in reviews], runs
@@ -686,7 +758,7 @@ def summarise(
         "arm": arm.name,
         "model": arm.model,
         "arm_config_hash": arm.config_hash(),
-        "stage": STAGE,
+        "stage": stage,
         "stages": [str(s) for s in stages],
         "cases": len(cases),
         "clean_cases": sum(c.kind is CaseKind.CLEAN for c in cases),
@@ -720,6 +792,16 @@ def summarise(
         "spent_this_invocation_usd": spent,
         "budget_usd": limit,
     }
+    if max_tool_turns is not None:
+        summary["tools"] = {
+            "max_turns": max_tool_turns,
+            # Requests that offer tools go without response_format (llm.py),
+            # so this row differs from single-pass in JSON mode as well.
+            "json_mode": False,
+            "model_calls": sum(r.generate.calls for r in reviews),
+            "tool_calls": sum(r.generate.tool_calls for r in reviews),
+            "reviews_using_tools": sum(r.generate.tool_calls > 0 for r in reviews),
+        }
     if grade_arm is not None:
         summary["grade"] = {
             "arm": grade_arm.name,

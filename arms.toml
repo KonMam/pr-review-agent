@@ -48,3 +48,67 @@ api_key_env = "DEEPSEEK_API_KEY"
 model = "deepseek-chat"
 price = { input_per_mtok = 0.28, output_per_mtok = 0.42 }  # check against DeepSeek's pricing page before use
 temperature = 0.2
+
+# --- Model ladder (item 5). Same pipeline, same prompt; only the model changes.
+# List prices from OpenRouter's /api/v1/models on 2026-11-06. Every arm keeps
+# data_collection = "deny": OpenRouter drops providers that store or train on
+# prompts, and a request with no such provider fails rather than falling back.
+
+# Mid tier: the same family one size up (1.6T MoE, 49B active), so the delta
+# against or-deepseek-flash is scale, not prompt fit. fp4 hosts are excluded:
+# the cheapest V4 Pro endpoints are fp4, and the ladder measures the model.
+# Reasoning is off: in the item-5 probe (reasoning on) both reviews spent all
+# 8192 tokens reasoning, were cut off, and were answered by the reasoning-off
+# retry anyway, at $0.027-0.038 a review; off, a review is ~$0.011.
+[arms.or-deepseek-pro]
+base_url = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_API_KEY"
+model = "deepseek/deepseek-v4-pro"
+reports_cost = true
+price = { input_per_mtok = 0.955, output_per_mtok = 1.911 }  # fallback, 2026-11-06 list price
+temperature = 0.2
+max_tokens = 8192
+extra_body = { provider = { data_collection = "deny", quantizations = ["fp8", "bf16", "fp16", "unknown"] }, reasoning = { enabled = false }, usage = { include = true } }
+extra_headers = { HTTP-Referer = "https://github.com/KonMam/pr-review-agent", X-OpenRouter-Title = "pr-review-agent" }
+
+# Strong tier: a closed frontier model at the $2/$10 price point. No
+# temperature: the model doesn't accept one.
+[arms.or-sonnet]
+base_url = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_API_KEY"
+model = "anthropic/claude-sonnet-5.5"
+reports_cost = true
+price = { input_per_mtok = 2.0, output_per_mtok = 10.0 }  # fallback, 2026-11-06 list price
+max_tokens = 8192
+truncation_extra_body = { reasoning = { enabled = false } }
+extra_body = { provider = { data_collection = "deny" }, usage = { include = true } }
+extra_headers = { HTTP-Referer = "https://github.com/KonMam/pr-review-agent", X-OpenRouter-Title = "pr-review-agent" }
+
+[arms.or-gpt-sol]
+base_url = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_API_KEY"
+model = "openai/gpt-6.1-sol"
+reports_cost = true
+price = { input_per_mtok = 2.0, output_per_mtok = 10.0 }  # fallback, 2026-11-06 list price
+max_tokens = 8192
+truncation_extra_body = { reasoning = { enabled = false } }
+extra_body = { provider = { data_collection = "deny" }, usage = { include = true } }
+extra_headers = { HTTP-Referer = "https://github.com/KonMam/pr-review-agent", X-OpenRouter-Title = "pr-review-agent" }
+
+# Mid tier that fits item 5's budget: Z.ai's large reasoning model for
+# software engineering, another family from DeepSeek. fp4 hosts excluded as for
+# V4 Pro. Without a ceiling, data_collection = "deny" + fp8 routed a probe to a
+# ~$1.4/M-input host ($0.052 for one 32k-token review), so max_price pins it to
+# the cheapest fp8 host's list price ($0.28 in / $0.88 out, 2026-11-06); a
+# request fails rather than going dearer. Reasoning can't be turned off on this
+# endpoint (HTTP 400), so a cut-off reply gets the ordinary retry instead.
+[arms.or-glm]
+base_url = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_API_KEY"
+model = "z-ai/glm-5.3"
+reports_cost = true
+price = { input_per_mtok = 0.28, output_per_mtok = 0.88 }  # = max_price below
+temperature = 0.2
+max_tokens = 8192
+extra_body = { provider = { data_collection = "deny", quantizations = ["fp8", "bf16", "fp16", "unknown"], sort = "price", max_price = { prompt = 0.28, completion = 0.88 } }, usage = { include = true } }
+extra_headers = { HTTP-Referer = "https://github.com/KonMam/pr-review-agent", X-OpenRouter-Title = "pr-review-agent" }

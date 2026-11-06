@@ -84,7 +84,7 @@ One item per session and PR.
 - [x] 3. **Agent v0:** the `arms.toml` loader, a single-pass generator, the budget guard, and `eval` with repeated runs, caching, cost and latency. Run it with the cheapest arm to get the first baseline.
 - [x] 4. **Multi-stage pipeline:** grade, dedup and suppress, each toggleable, plus the threshold sweep and the ablation table. Results are in the Pipeline section below.
 - [x] 4a. **Clean cases:** 20 bug-free commits added to the golden set so false positives are measurable, the scorer's false-positive rate, and item 4's ablation and sweep rerun on the combined set. Results are in the Clean cases section below.
-- [ ] 5. **Model ladder:** rerun the best pipeline on 2-3 arms from cheapest to stronger, to see whether a stronger model buys enough precision or recall to justify its cost. Also try read-only tools as an ablation.
+- [x] 5. **Model ladder:** rerun the best pipeline on 2-3 arms from cheapest to stronger, to see whether a stronger model buys enough precision or recall to justify its cost. Also try read-only tools as an ablation. Results are in the Model ladder section below; the strong tier didn't fit the budget and has an estimate instead.
 - [ ] 6. **CodeRabbit arm:** a public sandbox GitHub repo with one PR per case. Collect CodeRabbit's comments, normalise them to findings, and score them. **This needs my OK before any remote is created or anything is pushed.**
 - [ ] 7. **`docs/build-vs-buy.md`:** the comparison table, the hand-check results, and the recommendation.
 - [ ] 8. **CI on one Go repo:** a GitHub Action, defined in this repo, that reviews a Go repo's PRs with inline comments. This is the "would I actually use it" check. It runs on one of my Go repos, and wiring it in there **needs my OK first**, since it touches an existing project. One repo only.
@@ -203,6 +203,60 @@ The best F0.5 is at 0.3 (0.1-0.3 tie, and the highest wins), so the default stay
 - **20 clean cases are too few to rank stages on false positives.** Each run has 20 clean reviews, so one false positive moves the flagged share by 0.05. If item 5 or 6 needs a sharper false-positive number, the clean set should grow (the builder makes this cheap) before anything else is tuned on it.
 - **Truncation is higher on clean code.** 60 clean reviews had 23 generate attempts cut off at `max_tokens`, against 26 in 123 bug reviews (369 attempts). The model seems to keep reasoning when it finds nothing. Every one was recovered by the reasoning-off retry, so the reviews are complete, but the clean cases' p95 latency and cost carry that retry. Clean reviews averaged $0.0046 for generate.
 
+## Model ladder (item 5)
+
+Run 2026-11-06. The pipeline under test is single-pass + dedup + suppress, item 4a's recommendation, with grade as a separate ablation row. The generate prompt is unchanged (`generate-43defae9ada5`). Every arm sends `provider.data_collection = "deny"` and the attribution headers. `--concurrency 8`.
+
+**Budget.** The owner's OpenRouter workspace had $3.00 for this item, then $2 more; that is the ceiling. Item spend was **about $3.04**:
+- $1.28 for the tools ablation.
+- $1.52 for V4 Pro.
+- $0.14 for probes.
+- About $0.10 on calls that were never cached: two request timeouts, a 403 at the workspace cap, and a GLM request rejected with HTTP 400.
+
+That money didn't cover a strong tier or a grade row for V4 Pro.
+
+**One case left out.** `nats-clean-b5bc7b4` (56k-token prompt) has no V4 Pro run 3. Its budget-guard reservation was $0.41, more than was left. **Every row below is on the same 60 cases** (41 bug + 19 clean) × 3 runs, re-scored from cache. Run ids are `l5-flash-60`, `l5-flash-tools-60` and `l5-pro-60`. The full 61-case runs are `l5-flash-ds` and `l5-flash-tools`, and their numbers differ only in the third decimal.
+
+**Arms** (OpenRouter list prices per million tokens, from `/api/v1/models` on 2026-11-06):
+
+| Arm | Model | Price in / out | Why |
+|---|---|---|---|
+| `or-deepseek-flash` | `deepseek/deepseek-v4.1-flash` | $0.051 / $0.567 | The cheap baseline, already cached. |
+| `or-deepseek-pro` | `deepseek/deepseek-v4-pro`, **reasoning off**, fp4 hosts excluded | $0.955 / $1.911 | The same family one size up (1.6T MoE, 49B active), so the difference is scale, not prompt fit. With reasoning on, both probe reviews spent all 8,192 tokens reasoning, were cut off, and were answered by the reasoning-off retry, at $0.027-0.038 each (~$5.5 for 183 reviews). With reasoning off it is $0.008 a review. |
+| `or-glm` | `z-ai/glm-5.3`, fp8 or better, `max_price` at the cheapest fp8 host | $0.28 / $0.88 | A different-family mid tier that looked as if it fit. **Not run.** Reasoning can't be disabled on this endpoint (HTTP 400), and it reasoned to the cap anyway: 16,384 tokens over two attempts and a malformed reply on one of two probe cases. It also returned 429s. Measured cost was ~$0.013 a review (~$2.4 for 183). Without `max_price`, deny + fp8 routed a probe to a ~$1.4/M-input host ($0.052 for one review). |
+| `or-sonnet` / `or-gpt-sol` | `anthropic/claude-sonnet-5.5` / `openai/gpt-6.1-sol` | $2 / $10 | The strong tier. **Not run: it didn't fit.** At V4 Pro's measured 8.4k prompt tokens per review, without reasoning, it's ~$0.020 a review (~$3.6 for 183). With reasoning on, it's ~$0.06 (~$11). Both arms are in `arms.toml`, ready to run. |
+
+**Read-only tools.** On the cheap arm only, `pr-review eval --tools` lets the generator call two tools for up to 4 turns, then asks for the answer with `tool_choice = "none"`:
+- `read_file` (at most 300 lines)
+- `grep` (at most 40 matches)
+
+The tools read an offline snapshot of the repo at base. `pr-review snapshot` builds it from the local clones `cases/build.sh` makes: non-test `.go` files outside `vendor/` and `testdata/`, with the case's own `base/` files laid over them so the fix's comments stay out. It comes to 42 MB in `cache/snapshots/`, and no network is needed. Tests are left out because a fix commit's regression test would name the bug. Stub tests cover the loop, the turn cap, the retries and the snapshot builder.
+
+**Ladder** (60 cases × 3 runs; P/R/F1 and FP are means with min-max over runs; recall is on bug cases):
+
+| Row | Combined P | Bug-only P | Recall | F1 | FP/clean review | Clean flagged | Cost/review | p50 / p95 |
+|---|---|---|---|---|---|---|---|---|
+| flash: single-pass + dedup + suppress | 0.958 (0.915-1.000) | 0.993 | 0.787 (0.759-0.828) | 0.864 (0.829-0.906) | 0.088 (0.000-0.211) | 0.070 | $0.0043 | 15.2 s / 61.0 s |
+| flash: + grade (0.3) | 0.984 (0.976-1.000) | 1.000 | 0.741 (0.707-0.776) | 0.846 (0.820-0.874) | 0.035 (0.000-0.053) | 0.035 | $0.0065 | 28.2 s / 78.9 s |
+| flash: + read-only tools | 0.978 (0.959-1.000) | 0.993 | 0.787 (0.724-0.828) | 0.872 (0.831-0.906) | 0.035 (0.000-0.053) | 0.035 | $0.0067 | 19.2 s / 80.7 s |
+| V4 Pro, reasoning off | 0.931 (0.842-1.000) | 0.946 | 0.316 (0.259-0.397) | 0.471 (0.396-0.568) | 0.018 (0.000-0.053) | 0.018 | $0.0080 | 2.2 s / 5.8 s |
+| GLM-5.3 | not run: ~$0.013/review measured, reasoning can't be disabled | | | | | | | |
+| Sonnet 5.5 / GPT-6.1 Sol | not run: ~$0.020/review without reasoning, ~$0.06 with | | | | | | | |
+
+**Reading it:**
+- **A bigger model without reasoning is much worse, not better.** V4 Pro with reasoning off gives 0.51 findings per bug review against flash's 1.05, and recall falls from 0.787 to 0.316. It costs about twice as much per review, though it is 7× faster at p50.
+  - Its few false positives (1 in 57 clean reviews) come from saying little.
+  - Its bug-only precision, 0.946, is the lowest on the ladder: 3 of its 63 bug-case findings missed the bug's lines, against 1 of 138 for flash.
+  - So, on this set, reasoning matters more than scale. The cheap reasoning model beats the expensive one with reasoning turned off.
+- **Whether a stronger reasoning model pays is still open.** V4 Pro with reasoning on and both $2/$10 models didn't fit the money: about $5.5, $3.6 and $11 respectively for 183 reviews. A useful first test of a stronger model is V4 Pro reasoning-on, or Sonnet 5.5, on the cases where flash misses a bug in every run (at most 6 of the 58 bugs). That is a few dollars, not ten.
+- **Tools: same recall, fewer clean false positives, +55% cost. Not kept as the default.**
+  - Tools were called in 139 of 180 reviews, 539 calls in all. Recall is unchanged (0.787), as is bug-only precision. Clean false positives fall from 5 to 2 (FP per clean review 0.088 to 0.035). That is the same false-positive gain grade gives, without grade's 0.046 recall loss, at about the same cost ($0.0067 vs $0.0065) and less latency (p50 19 s vs 28 s).
+  - Two caveats keep it from paying for itself yet. First, the gain is 3 false positives, inside run-to-run noise (0 to 4 per run). Second, 6 tools reviews came back malformed, against 0 for single-pass, and 3 of them are clean reviews. Requests that offer tools go without JSON mode (`summary.tools.json_mode = false`). If each of those 3 clean reviews had held one false positive, tools would tie single-pass. On the 3 clean reviews in question, single-pass found nothing in the same run, so the tie is the worst case, not the likely one.
+  - So tools stay as an option (`--tools`), and the default stays single-pass + dedup + suppress. If false positives turn out to matter more than cost, tools are a better precision stage than grade on these numbers, since they don't cost recall. Item 7's hand-check should sample their clean-case findings too.
+- **The cheap arm stays the arm for items 6-7.** Nothing measured here beats flash single-pass on F1 at its cost of $0.0043 per review.
+- **Routing makes cost per review hard to predict.** `data_collection = "deny"` plus a quantization filter can route to hosts several times the list price. GLM's probe paid ~5× the cheapest host, and V4 Pro reviews ranged from $0.0017 to $0.09. `provider.max_price` pins a ceiling. The budget guard's worst case (2× list, full `max_tokens`) also refuses very large prompts near the end of a budget: nats-clean's 56k-token prompt reserved $0.41.
+- **Request timeouts abort a run.** One tools review hit the 180 s client timeout on its retry, which stopped the whole eval; rerunning used the cache. A per-request timeout retry is a possible follow-up.
+
 ## Decisions
 
 - **Model access: OpenRouter, behind config-defined arms. The Anthropic API is rejected for now.**
@@ -219,7 +273,7 @@ The best F0.5 is at 0.3 (0.1-0.3 tie, and the highest wins), so the default stay
   - Both `openai` and `pydantic` are new dependencies. The reason: they're the only two needed to call any arm and validate its replies.
   - Rejected: pydantic-ai (more abstraction than one prompt needs), LiteLLM SDK (supply-chain incidents in 2026, and OpenRouter already normalises providers).
   - Wiring in the Agent SDK as a later arm is possible once there are credits. Moving the agent loop between frameworks isn't something this POC needs to settle.
-- **No tool loop in v0.** The diff plus the changed files at the base commit should catch most bugs a reviewer can see. Cross-file bugs are where tools would help, and item 5 measures whether that's worth the extra tokens.
+- **No tool loop in v0.** The diff plus the changed files at the base commit should catch most bugs a reviewer can see. Cross-file bugs are where tools would help, and item 5 measures whether that's worth the extra tokens. *Item 5:* read-only tools left recall unchanged and cut clean false positives (5 to 2) for +55% cost; that is within noise, so they stay an option (`--tools`), not the default.
 - **Corpus: Go only, mixing my repos with OSS.**
   - The aim is a tool I'd use myself, and Go is what I write most (gbemu, dagr, go-taskqueue, dungeon, duckserve).
   - One language means the prompt, bug classes and corpus can all be specific, and a small golden set isn't spread across languages.

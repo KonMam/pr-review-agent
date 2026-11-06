@@ -79,6 +79,8 @@ class GenerateResult:
     completion_tokens: int
     cost_usd: float
     latency_s: float
+    calls: int = 0  # model calls; 0 means the same as attempts (no tool loop)
+    tool_calls: int = 0  # read-only tool calls the model made (tools ablation)
 
 
 class _ReplyFinding(BaseModel):
