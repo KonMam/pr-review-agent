@@ -1,0 +1,139 @@
+name: pr-review
+description: >-
+  Precision-first Go PR reviewer. Reviews a pull request's Go changes on a cheap
+  OpenRouter model, posts each finding as an inline review comment, and uploads
+  a JSONL findings log as a workflow artifact.
+
+# Use from a workflow triggered by `pull_request`, with
+#   permissions: { contents: read, pull-requests: write }
+# The OpenRouter key comes from a repo secret and is only ever passed as an env
+# var to the review step. Fork PRs get no secrets, so the review is skipped.
+
+inputs:
+  openrouter-api-key:
+    description: OpenRouter API key (pass a repo secret)
+    required: true
+  github-token:
+    description: token that may write PR reviews
+    default: ${{ github.token }}
+  arm:
+    description: arm in this action's arms.toml
+    default: or-deepseek-flash
+  stages:
+    description: stages after generate
+    default: dedup,suppress
+  tools:
+    description: '"true" lets the model call read_file/grep on the base tree'
+    default: "false"
+  budget-usd:
+    description: hard spend limit for one review
+    default: "0.05"
+
+outputs:
+  findings:
+    description: number of findings posted
+    value: ${{ steps.post.outputs.findings }}
+
+runs:
+  using: composite
+  steps:
+    - name: Check inputs
+      id: check
+      shell: bash
+      env:
+        KEY: ${{ inputs.openrouter-api-key }}
+        EVENT: ${{ github.event_name }}
+      run: |
+        if [ "$EVENT" != "pull_request" ]; then
+          echo "::error::pr-review runs on pull_request events only"; exit 1
+        fi
+        if [ -z "$KEY" ]; then
+          echo "::notice::OPENROUTER_API_KEY is empty (not set, or a fork PR); skipping the review"
+          echo "enabled=false" >> "$GITHUB_OUTPUT"
+        else
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Check out the PR head
+      if: steps.check.outputs.enabled == 'true'
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        ref: ${{ github.event.pull_request.head.sha }}
+        path: .pr-review/head
+        fetch-depth: 0
+        persist-credentials: false
+
+    - name: Build the diff and the base tree
+      if: steps.check.outputs.enabled == 'true'
+      shell: bash
+      env:
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      run: |
+        set -euo pipefail
+        work="$GITHUB_WORKSPACE/.pr-review"
+        mb="$(git -C "$work/head" merge-base "$BASE_SHA" "$HEAD_SHA")"
+        # What GitHub shows on the PR: head against the merge base.
+        git -C "$work/head" diff --no-color --no-ext-diff "$mb" "$HEAD_SHA" > "$work/pr.diff"
+        mkdir -p "$work/base"
+        git -C "$work/head" archive "$mb" | tar -x -C "$work/base"
+        echo "merge base $mb, diff $(wc -l < "$work/pr.diff") lines"
+
+    - name: Set up uv
+      if: steps.check.outputs.enabled == 'true'
+      uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+
+    - name: Review
+      if: steps.check.outputs.enabled == 'true'
+      shell: bash
+      env:
+        OPENROUTER_API_KEY: ${{ inputs.openrouter-api-key }}
+        ARM: ${{ inputs.arm }}
+        STAGES: ${{ inputs.stages }}
+        TOOLS: ${{ inputs.tools }}
+        BUDGET: ${{ inputs.budget-usd }}
+      run: |
+        set -euo pipefail
+        work="$GITHUB_WORKSPACE/.pr-review"
+        extra=()
+        if [ "$TOOLS" = "true" ]; then extra+=(--tools); fi
+        uv run --quiet --locked --project "$GITHUB_ACTION_PATH" pr-review review \
+          --diff "$work/pr.diff" --base-dir "$work/base" \
+          --arms-file "$GITHUB_ACTION_PATH/arms.toml" --arm "$ARM" \
+          --stages "$STAGES" --budget-usd "$BUDGET" --out "$work/report.json" \
+          "${extra[@]}" > /dev/null
+        echo "report: $(jq -c '{findings: (.findings | length), cost_usd, malformed, go_files}' "$work/report.json")"
+
+    - name: Post comments and write the findings log
+      if: steps.check.outputs.enabled == 'true'
+      id: post
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        REPO: ${{ github.repository }}
+        PR: ${{ github.event.pull_request.number }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        API_URL: ${{ github.api_url }}
+      run: |
+        set -euo pipefail
+        work="$GITHUB_WORKSPACE/.pr-review"
+        uv run --quiet --locked --project "$GITHUB_ACTION_PATH" pr-review post \
+          --report "$work/report.json" --diff "$work/pr.diff" \
+          --repo "$REPO" --pr "$PR" --head-sha "$HEAD_SHA" \
+          --log "$work/findings.jsonl" --api-url "$API_URL"
+        echo "findings=$(wc -l < "$work/findings.jsonl" | tr -d ' ')" >> "$GITHUB_OUTPUT"
+        {
+          echo "### pr-review"
+          jq -r '"\(.model): \(.findings | length) findings, $\(.cost_usd)"' "$work/report.json"
+        } >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Upload the findings log
+      if: always() && steps.check.outputs.enabled == 'true'
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: pr-review-findings-pr${{ github.event.pull_request.number }}-${{ github.run_attempt }}
+        path: |
+          .pr-review/findings.jsonl
+          .pr-review/report.json
+        if-no-files-found: warn
+        retention-days: 90

@@ -7,6 +7,7 @@ scores themselves come from `grade.py`.
 Order is the spec's: grade, then dedup, then suppress. Each is toggleable.
 """
 
+import hashlib
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -25,6 +26,15 @@ ORDER = (Stage.GRADE, Stage.DEDUP, Stage.SUPPRESS)
 # The spec's out-of-scope categories: gofmt, go vet and golangci-lint own them.
 SUPPRESSED_CATEGORIES = frozenset(
     {"style", "naming", "formatting", "docs", "readability"}
+)
+
+# Logged with every CI finding (item 8), so item 9 can tell which stage rules
+# produced it. Bump DEDUP_VERSION when `_same_claim` or `dedup` changes;
+# SUPPRESS_VERSION follows the category list on its own.
+DEDUP_VERSION = "dedup-1"
+SUPPRESS_VERSION = (
+    "suppress-"
+    + hashlib.sha256(",".join(sorted(SUPPRESSED_CATEGORIES)).encode()).hexdigest()[:8]
 )
 
 # From the item-4 sweep (or-deepseek-flash, 41x3): the highest recall at the

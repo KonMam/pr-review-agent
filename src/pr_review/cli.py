@@ -1,15 +1,29 @@
-"""Command line: `pr-review eval --arm <name> --runs N`, `snapshot`, `judge`."""
+"""Command line: `pr-review eval --arm <name> --runs N`, `snapshot`, `judge`, `review`, `post`."""
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
 from pr_review.arms import ArmsError, load_arm
 from pr_review.evaluate import DEFAULT_CONCURRENCY, base_dir, run_eval
+from pr_review.github import (
+    DEFAULT_API_URL,
+    GitHub,
+    GitHubError,
+    post_report,
+    write_log,
+)
 from pr_review.judge import Row, load_agent_row, load_coderabbit_row, run_judge
 from pr_review.llm import DEFAULT_BUDGET_USD, Budget, BudgetExceeded, CostUnknown
 from pr_review.manifest import ManifestError, load_manifest
+from pr_review.review import (
+    DEFAULT_REVIEW_BUDGET_USD,
+    DEFAULT_REVIEW_STAGES,
+    Report,
+    review_pr,
+)
 from pr_review.snapshot import build_snapshot, clone_dir
 from pr_review.stages import DEFAULT_THRESHOLD, Stage
 from pr_review.tools import DEFAULT_MAX_TURNS
@@ -157,12 +171,68 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="start at most this many judge calls a minute (provider rate caps)",
     )
+    rv = sub.add_parser(
+        "review",
+        help="review one PR: its diff and a tree of the repo at its base; "
+        "prints a JSON report (CI runs this)",
+    )
+    rv.add_argument("--diff", type=Path, required=True, help="the PR's unified diff")
+    rv.add_argument(
+        "--base-dir",
+        type=Path,
+        required=True,
+        help="the repo's files at the PR's base (merge base), e.g. a git archive",
+    )
+    rv.add_argument("--arm", default="or-deepseek-flash")
+    rv.add_argument("--arms-file", type=Path, default=Path("arms.toml"))
+    rv.add_argument(
+        "--stages",
+        type=_stages,
+        default=list(DEFAULT_REVIEW_STAGES),
+        metavar="LIST",
+        help="stages after generate (default: dedup,suppress)",
+    )
+    rv.add_argument("--grade-arm", default=None)
+    rv.add_argument("--grade-threshold", type=float, default=DEFAULT_THRESHOLD)
+    rv.add_argument(
+        "--tools",
+        action="store_true",
+        help="let the generator call read_file/grep on --base-dir",
+    )
+    rv.add_argument("--max-tool-turns", type=int, default=DEFAULT_MAX_TURNS)
+    rv.add_argument(
+        "--budget-usd",
+        type=float,
+        default=DEFAULT_REVIEW_BUDGET_USD,
+        help=f"hard spend limit for this review (default {DEFAULT_REVIEW_BUDGET_USD})",
+    )
+    rv.add_argument("--out", type=Path, default=None, help="also write the report here")
+    po = sub.add_parser(
+        "post",
+        help="post a review report as inline PR comments and write the findings "
+        "log (token in GITHUB_TOKEN)",
+    )
+    po.add_argument("--report", type=Path, required=True)
+    po.add_argument(
+        "--diff", type=Path, required=True, help="the diff the report reviewed"
+    )
+    po.add_argument("--repo", required=True, help="owner/name")
+    po.add_argument("--pr", type=int, required=True)
+    po.add_argument("--head-sha", required=True)
+    po.add_argument(
+        "--log", type=Path, required=True, help="JSONL findings log to write"
+    )
+    po.add_argument("--api-url", default=DEFAULT_API_URL)
     args = parser.parse_args(argv)
 
     if args.command == "snapshot":
         return _snapshot(args)
     if args.command == "judge":
         return _judge(args)
+    if args.command == "review":
+        return _review(args)
+    if args.command == "post":
+        return _post(args)
 
     try:
         arm = load_arm(args.arms_file, args.arm)
@@ -244,6 +314,83 @@ def _snapshot(args: argparse.Namespace) -> int:
             return 2
         n = build_snapshot(case, clone, base_dir(case, args.root), args.out / case.id)
         print(f"{case.id}: {n} files")
+    return 0
+
+
+def _review(args: argparse.Namespace) -> int:
+    try:
+        arm = load_arm(args.arms_file, args.arm)
+        grade_arm = load_arm(args.arms_file, args.grade_arm) if args.grade_arm else None
+        diff = args.diff.read_text(encoding="utf-8")
+    except (ArmsError, OSError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    if not args.base_dir.is_dir():
+        print(f"error: --base-dir {args.base_dir} is not a directory", file=sys.stderr)
+        return 2
+    if args.budget_usd <= 0 or args.max_tool_turns < 1:
+        print(
+            "error: --budget-usd and --max-tool-turns must be positive", file=sys.stderr
+        )
+        return 2
+    if not 0 <= args.grade_threshold <= 1:
+        print("error: --grade-threshold must be in [0, 1]", file=sys.stderr)
+        return 2
+    budget = Budget(args.budget_usd)
+    try:
+        report = review_pr(
+            diff=diff,
+            base_dir=args.base_dir,
+            arm=arm,
+            budget=budget,
+            stages=args.stages,
+            grade_arm=grade_arm,
+            threshold=args.grade_threshold,
+            tools=args.tools,
+            max_tool_turns=args.max_tool_turns,
+        )
+    except (FileNotFoundError, ValueError, RuntimeError) as e:
+        # BudgetExceeded and CostUnknown are RuntimeErrors too.
+        print(f"stopped: {e}", file=sys.stderr)
+        return 3
+    text = report.model_dump_json(indent=2)
+    if args.out:
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(text + "\n", encoding="utf-8")
+    print(text)
+    return 0
+
+
+def _post(args: argparse.Namespace) -> int:
+    token = os.environ.get("GITHUB_TOKEN")
+    if not token:
+        print("error: GITHUB_TOKEN is not set", file=sys.stderr)
+        return 2
+    try:
+        report = Report.model_validate_json(args.report.read_text(encoding="utf-8"))
+        diff = args.diff.read_text(encoding="utf-8")
+    except (OSError, ValueError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    try:
+        posted = post_report(
+            GitHub(token, args.api_url),
+            report=report,
+            diff=diff,
+            repo=args.repo,
+            pr=args.pr,
+            head_sha=args.head_sha,
+        )
+    except (GitHubError, ValueError) as e:
+        write_log(args.log, [])
+        print(f"error: {e}", file=sys.stderr)
+        return 3
+    write_log(args.log, posted.records)
+    inline = sum(r.posted == "inline" for r in posted.records)
+    print(
+        f"posted {len(posted.records)} findings ({inline} inline) "
+        f"in review {posted.review_id}; log: {args.log}"
+    )
     return 0
 
 

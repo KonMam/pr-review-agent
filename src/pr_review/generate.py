@@ -161,10 +161,32 @@ def generate(
 _DIFF_OLD = re.compile(r"^--- (?:a/)?(.+?)\s*$")
 
 
+_HUNK_COUNTS = re.compile(r"^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@")
+
+
 def changed_base_paths(diff: str) -> list[str]:
-    """Paths the diff changes that exist at base (new files have `--- /dev/null`)."""
+    """Paths the diff changes that exist at base (new files have `--- /dev/null`).
+
+    Hunk bodies are skipped by the line counts in their `@@` headers, so a
+    removed line that reads `-- ...` (an SQL comment, say) isn't a file header.
+    """
     paths: list[str] = []
+    old_left = new_left = 0
     for line in diff.splitlines():
+        if old_left > 0 or new_left > 0:
+            if line.startswith("+"):
+                new_left -= 1
+            elif line.startswith("-"):
+                old_left -= 1
+            elif not line.startswith("\\"):
+                old_left -= 1
+                new_left -= 1
+            continue
+        h = _HUNK_COUNTS.match(line)
+        if h:
+            old_left = int(h.group(1) or "1")
+            new_left = int(h.group(2) or "1")
+            continue
         m = _DIFF_OLD.match(line)
         if m and m.group(1) != "/dev/null" and m.group(1) not in paths:
             paths.append(m.group(1))
