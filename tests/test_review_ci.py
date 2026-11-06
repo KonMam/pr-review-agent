@@ -235,7 +235,14 @@ def github_stub() -> Iterator[GitHubStub]:
                 return
             review_id = 100 + len(reviews)
             reviews[review_id] = [
-                {**c, "id": 1000 * review_id + i, "original_line": c["line"]}
+                # As GitHub's list-review-comments answers: no line numbers.
+                {
+                    "path": c["path"],
+                    "body": c["body"],
+                    "id": 1000 * review_id + i,
+                    "line": None,
+                    "original_line": None,
+                }
                 for i, c in enumerate(body["comments"])
             ]
             self._send(200, {"id": review_id})

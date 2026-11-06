@@ -253,21 +253,22 @@ def post_report(
     review_id = gh.create_review(
         repo, pr, head_sha, _review_body(report, outside), comments
     )
-    ids: dict[tuple[str, int, str], list[int]] = {}
+    # Keyed by path and body: this endpoint returns `line: null` (seen on
+    # GitHub, 2026-11-06), so the line can't be part of the match.
+    ids: dict[tuple[str, str], list[int]] = {}
     if inline:
         # The review is posted: a failed id lookup must not lose the log, so
         # its records keep comment_id None (item 9 can match by review_id).
         try:
             for c in gh.review_comments(repo, pr, review_id):
-                line = c.get("line") or c.get("original_line") or 0
-                ids.setdefault((c["path"], line, c["body"]), []).append(int(c["id"]))
+                ids.setdefault((c["path"], c["body"]), []).append(int(c["id"]))
         except GitHubError as e:
             print(f"warning: comment ids not read: {e}", file=sys.stderr)
 
     def record(rf: ReportFinding, a: Anchor | None) -> LogRecord:
         comment_id = None
         if a is not None:
-            got = ids.get((a.path, a.line, comment_body(rf)))
+            got = ids.get((a.path, comment_body(rf)))
             comment_id = got.pop(0) if got else None
         f = rf.finding
         return LogRecord(

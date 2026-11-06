@@ -18,7 +18,7 @@
   - It also has an ablation table: single-pass, then adding grade, dedup and suppress one at a time.
   - Every run has a hard budget enforced in code (default $1), and the provider key has its own spend limit as a backstop.
 - [ ] **No style comments.** Across all cases and runs, the agent posts zero findings in a suppressed category (style, naming, formatting, docs, readability). A test on the stored results checks this.
-- [ ] **Findings log.** Every CI review writes a JSONL log of each posted finding and uploads it as a workflow artifact (item 8).
+- [x] **Findings log.** Every CI review writes a JSONL log of each posted finding and uploads it as a workflow artifact (item 8).
   - Each record has: repo, PR number, head SHA, file, line range, category, claim, arm/model id, prompt version, stage versions, and grade score if graded.
   - A test checks the record schema against a stub review, with no network calls.
 - [ ] **Feedback loop.** After merge, each logged finding gets its signals, and outcomes are promoted into the golden set (item 9).
@@ -88,8 +88,9 @@ One item per session and PR.
 - [x] 5. **Model ladder:** rerun the best pipeline on 2-3 arms from cheapest to stronger, to see whether a stronger model buys enough precision or recall to justify its cost. Also try read-only tools as an ablation. Results are in the Model ladder section below; the strong tier didn't fit the budget and has an estimate instead.
 - [x] 6. **CodeRabbit arm:** a public sandbox GitHub repo with one PR per case. Collect CodeRabbit's comments, normalise them to findings, and score them. **This needs my OK before any remote is created or anything is pushed.** Results are in the CodeRabbit section below.
 - [x] 7. **`docs/build-vs-buy.md`:** the comparison table, the claim-judge results (in place of the hand-check, see Matching rule), and the recommendation. Results are in the Build vs buy section below and in [`docs/build-vs-buy.md`](../build-vs-buy.md).
-- [ ] 8. **CI on one Go repo:** a GitHub Action, defined in this repo, that reviews a Go repo's PRs with inline comments. This is the "would I actually use it" check. It runs on one of my Go repos, and wiring it in there **needs my OK first**, since it touches an existing project. One repo only.
+- [x] 8. **CI on one Go repo:** a GitHub Action, defined in this repo, that reviews a Go repo's PRs with inline comments. This is the "would I actually use it" check. It runs on one of my Go repos, and wiring it in there **needs my OK first**, since it touches an existing project. One repo only.
   - Every CI review also writes a JSONL log of each posted finding and uploads it as a workflow artifact. Each record has repo, PR number, head SHA, file, line range, category, claim, arm/model id, prompt and stage versions, and grade score if graded. This is the input to item 9, so it ships from the first CI run.
+  - Done on go-taskqueue (owner's pick). Results are in the CI section below.
 - [ ] 9. **Feedback loop:** learn from real use on that one repo. Needs item 8's log. Traffic on my repos is low (a handful of PRs a month), so the realistic loop is a **weekly hand-read** of the logged findings plus promotions; the automated signals are a bonus, not something to wait on.
   - **Signals, collected after a PR merges, per logged finding:** 👍/👎 reactions on the inline comment, and "addressed": the flagged lines changed in a later commit of the same PR before merge. uReview found addressed to be the most useful signal.
   - **Promotion into the golden set,** using the existing builders, with `source: production` in the case's provenance:
@@ -343,6 +344,26 @@ Run 2026-11-06. The write-up is [`docs/build-vs-buy.md`](../build-vs-buy.md); th
 - **Self-consistency.** 39 of 40 repeated verdicts agree (0.975). Kappa is 0 because the first pass said yes to all 40, so this doesn't show the judge can discriminate.
 - **The judge has not been checked against human labels.** It rejected 6 of 309 findings. Some rejections look right (a claim that the buggy removal is "fine"). At least three look too strict (go-taskqueue-f8d74eb race findings).
 - **Grade, settled as far as the judge can settle it.** Grade drops 8 location matches over 3 runs: the judge confirms 6 of them and rejects 2. So grade isn't mainly removing wrong-reason findings, and it stays off by default.
+
+## CI on go-taskqueue (item 8)
+
+Run 2026-11-06. The repo is public at `github.com/KonMam/pr-review-agent` and holds the action.
+
+- **Pieces.**
+  - `pr-review review` (`review.py`) runs the eval's default configuration on one PR: single-pass on `or-deepseek-flash`, then dedup and suppress, with `--tools` optional. It reviews only the PR's `.go` files, against a tree of the repo at the merge base, with a hard $0.05 budget, and prints a JSON report.
+  - `pr-review post` (`github.py`) makes one PR review (event COMMENT) with a terse inline comment per finding: the category and the claim. A finding outside the diff's hunks goes in the review body. Suppressed categories are dropped again here.
+  - It writes `findings.jsonl` with one record per posted finding: the spec's fields, plus where the finding was posted, the review id, the comment id and the line it sits on, so item 9 can read reactions.
+  - The composite action (`action.yml`) checks out the head, builds the diff against the merge base and the base tree (`git archive`), runs both commands, and uploads the log and report as the artifact `pr-review-findings-pr<N>-<attempt>`. The key is passed only as an env var. Without it (a fork PR, or no secret) the review is skipped.
+  - Tests (`tests/test_review_ci.py`) use the stub model server and a stub GitHub REST server, with no network calls.
+- **Wiring.** `go-taskqueue/.github/workflows/pr-review.yml` uses `KonMam/pr-review-agent@main` on non-draft PRs, with `pull-requests: write` and the `OPENROUTER_API_KEY` repo secret. The workflow PR is KonMam/go-taskqueue#1. Its main branch is untouched until the owner merges.
+- **End-to-end test.** KonMam/go-taskqueue#2 is case `go-taskqueue-aac3b48`, stacked on #1. Its input is byte-identical to the eval's: the same diff and the same base file.
+  - Runs 1 and 2 returned no findings ($0.0055 and $0.0050). On this case flash returns nothing in about 1 run of 3 in the golden-set runs too.
+  - Run 3 ($0.0032) posted 3 inline comments, on lines 61, 91 and 148, all `ignored_err` and all ground-truth bugs. There were no false positives and no style comments.
+  - Total spend $0.014.
+- **Bug found by the live run.** GitHub's list-review-comments endpoint returns `line: null`, so the run-3 log has `comment_id: null`. Comment ids are now matched on path and body, and the stub returns `line: null` the way GitHub does.
+- **Follow-ups.**
+  - Each push to a PR posts a fresh review, so comments repeat across pushes.
+  - One sample per PR misses this case about a third of the time. Two or three samples with a union, or tools on (which never came back empty on this case), would trade cost for recall.
 
 ## Decisions
 
