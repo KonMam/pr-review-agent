@@ -374,6 +374,8 @@ def test_concurrent_calls_overlap_and_order_is_stable(project: Path) -> None:
         rows = [json.loads(line) for line in path.read_text().splitlines()]
         for row in rows:
             assert row.pop("latency_s") > 0
+            # Each stage's own timing too: everything else must match.
+            assert row["generate"].pop("latency_s") > 0
         return rows
 
     concurrent = reviews("cheap")
@@ -386,6 +388,8 @@ def test_concurrent_calls_overlap_and_order_is_stable(project: Path) -> None:
         data = json.loads((project / "results" / run_id / "summary.json").read_text())
         for key in ("run_id", "latency_s"):
             data.pop(key)
+        for row in data["ablation"]:
+            row.pop("latency_s")
         return data
 
     assert summary("cheap") == summary("serial")

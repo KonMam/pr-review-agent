@@ -8,6 +8,16 @@ from pr_review.arms import ArmsError, load_arm
 from pr_review.evaluate import DEFAULT_CONCURRENCY, run_eval
 from pr_review.llm import DEFAULT_BUDGET_USD, Budget, BudgetExceeded, CostUnknown
 from pr_review.manifest import ManifestError, load_manifest
+from pr_review.stages import DEFAULT_THRESHOLD, Stage
+
+
+def _stages(value: str) -> list[Stage]:
+    names = [v.strip() for v in value.split(",") if v.strip()]
+    try:
+        return [Stage(n) for n in names]
+    except ValueError as e:
+        known = ", ".join(s.value for s in Stage)
+        raise argparse.ArgumentTypeError(f"{e}; known stages: {known}") from e
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -48,10 +58,30 @@ def main(argv: list[str] | None = None) -> int:
         help="reviews in flight at once; 1 runs them one by one "
         f"(default {DEFAULT_CONCURRENCY})",
     )
+    ev.add_argument(
+        "--stages",
+        type=_stages,
+        default=[],
+        metavar="LIST",
+        help="comma-separated stages after generate: grade, dedup, suppress "
+        "(always run in that order). Default: none, the single-pass reviewer",
+    )
+    ev.add_argument(
+        "--grade-arm",
+        default=None,
+        help="arm for the grade stage (default: the --arm)",
+    )
+    ev.add_argument(
+        "--grade-threshold",
+        type=float,
+        default=DEFAULT_THRESHOLD,
+        help=f"drop candidates graded below this (default {DEFAULT_THRESHOLD})",
+    )
     args = parser.parse_args(argv)
 
     try:
         arm = load_arm(args.arms_file, args.arm)
+        grade_arm = load_arm(args.arms_file, args.grade_arm) if args.grade_arm else arm
         cases = load_manifest(args.manifest)
         if args.case_ids:
             unknown = set(args.case_ids) - {c.id for c in cases}
@@ -67,6 +97,17 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+    if Stage.GRADE not in args.stages and (
+        args.grade_arm or args.grade_threshold != DEFAULT_THRESHOLD
+    ):
+        print(
+            "warning: --grade-arm and --grade-threshold have no effect "
+            "without --stages grade",
+            file=sys.stderr,
+        )
+    if not 0 <= args.grade_threshold <= 1:
+        print("error: --grade-threshold must be in [0, 1]", file=sys.stderr)
+        return 2
     budget = Budget(args.budget_usd)
     try:
         summary = run_eval(
@@ -79,6 +120,9 @@ def main(argv: list[str] | None = None) -> int:
             budget=budget,
             run_id=args.run_id,
             concurrency=args.concurrency,
+            stages=args.stages,
+            grade_arm=grade_arm,
+            threshold=args.grade_threshold,
         )
     except BudgetExceeded as e:
         print(

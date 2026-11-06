@@ -6,7 +6,6 @@ provenance (eval leakage).
 """
 
 import hashlib
-import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,7 +15,14 @@ from openai.types.chat import ChatCompletionMessageParam
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from pr_review.arms import Arm
-from pr_review.llm import Budget, chat
+from pr_review.ask import (
+    ASK_VERSION,
+    RETRY_PROMPT,
+    MalformedReply,
+    ask_json,
+    load_json,
+)
+from pr_review.llm import Budget
 from pr_review.models import Finding, LineRange
 
 SYSTEM_PROMPT = """\
@@ -45,20 +51,11 @@ overflow_off_by_one, unclosed_resource, other_bug>", "claim": "<what is wrong>",
 Line numbers refer to the file after the diff is applied.\
 """
 
-RETRY_PROMPT = """\
-Your reply was not valid. Error: {error}
-Reply again with only the JSON object described above.\
-"""
-
-# Changes whenever the prompt or the parsing contract changes, so cached
-# replies from an older prompt aren't reused.
-PROMPT_VERSION = hashlib.sha256((SYSTEM_PROMPT + RETRY_PROMPT).encode()).hexdigest()[
-    :12
-]
-
-
-class MalformedReply(ValueError):
-    """The model's reply isn't the JSON shape the prompt asks for."""
+# Changes whenever the prompt, the parsing contract or the retry rules change,
+# so cached replies from an older version aren't reused.
+PROMPT_VERSION = hashlib.sha256(
+    (SYSTEM_PROMPT + RETRY_PROMPT + ASK_VERSION).encode()
+).hexdigest()[:12]
 
 
 @dataclass(frozen=True)
@@ -74,6 +71,8 @@ class GenerateResult:
     findings: list[Finding]
     malformed: bool  # still malformed after the one retry
     attempts: int
+    truncated: int  # attempts cut off at max_tokens
+    reasoning_tokens: int
     retries: int  # 429/5xx retries across attempts
     retry_wait_s: float  # their failed attempts and backoff, not in latency_s
     prompt_tokens: int
@@ -109,77 +108,49 @@ class _Reply(BaseModel):
     findings: list[_ReplyFinding]
 
 
-_FENCE = re.compile(r"^\s*```(?:json)?\s*\n(.*?)\n\s*```\s*$", re.DOTALL)
-
-
 def parse_reply(content: str) -> list[Finding]:
     """Validate a reply into findings. Raises `MalformedReply`."""
-    text = content.strip()
-    fenced = _FENCE.match(text)
-    if fenced:
-        text = fenced.group(1)
     try:
-        data = json.loads(text)
-    except json.JSONDecodeError as e:
-        raise MalformedReply(f"not JSON: {e.msg} at char {e.pos}") from e
-    try:
-        reply = _Reply.model_validate(data)
+        reply = _Reply.model_validate(load_json(content))
     except ValidationError as e:
         raise MalformedReply(str(e)) from e
     return [f.to_finding() for f in reply.findings]
 
 
-def build_messages(review: ReviewInput) -> list[ChatCompletionMessageParam]:
+def pr_text(review: ReviewInput) -> str:
+    """The PR as every stage shows it: the diff, then each changed file at base."""
     parts = ["## Diff\n", "```diff\n", review.diff.rstrip("\n"), "\n```\n"]
     if review.base_files:
         parts.append("\n## Changed files at the base commit\n")
         for path, text in sorted(review.base_files.items()):
             parts += [f"\n### {path}\n", "```go\n", text.rstrip("\n"), "\n```\n"]
+    return "".join(parts)
+
+
+def build_messages(review: ReviewInput) -> list[ChatCompletionMessageParam]:
     return [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": "".join(parts)},
+        {"role": "user", "content": pr_text(review)},
     ]
 
 
 def generate(
     client: OpenAI, arm: Arm, review: ReviewInput, budget: Budget
 ) -> GenerateResult:
-    """One review: a call, and one retry if the reply is malformed."""
-    messages = build_messages(review)
-    prompt_tokens = completion_tokens = retries = 0
-    cost = latency = retry_wait = 0.0
-    for attempt in (1, 2):
-        reply = chat(client, arm, messages, budget)
-        prompt_tokens += reply.prompt_tokens
-        completion_tokens += reply.completion_tokens
-        cost += reply.cost_usd
-        latency += reply.latency_s
-        retries += reply.retries
-        retry_wait += reply.retry_wait_s
-        try:
-            findings = parse_reply(reply.content)
-        except MalformedReply as e:
-            if attempt == 2:
-                findings, malformed = [], True
-                break
-            messages = [
-                *messages,
-                {"role": "assistant", "content": reply.content},
-                {"role": "user", "content": RETRY_PROMPT.format(error=str(e)[:500])},
-            ]
-            continue
-        malformed = False
-        break
+    """One review: a call, and one retry if the reply is malformed or cut off."""
+    r = ask_json(client, arm, build_messages(review), budget, parse_reply)
     return GenerateResult(
-        findings=findings,
-        malformed=malformed,
-        attempts=attempt,
-        retries=retries,
-        retry_wait_s=retry_wait,
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
-        cost_usd=cost,
-        latency_s=latency,
+        findings=r.value or [],
+        malformed=r.malformed,
+        attempts=r.attempts,
+        truncated=r.truncated,
+        reasoning_tokens=r.reasoning_tokens,
+        retries=r.retries,
+        retry_wait_s=r.retry_wait_s,
+        prompt_tokens=r.prompt_tokens,
+        completion_tokens=r.completion_tokens,
+        cost_usd=r.cost_usd,
+        latency_s=r.latency_s,
     )
 
 

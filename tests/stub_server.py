@@ -9,7 +9,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 # Given the request body, return (assistant content, extra usage fields), or
-# raise `StubError` to answer with an HTTP error. It may sleep: the server
+# raise `StubError` to answer with an HTTP error. A "finish_reason" key in the
+# extra fields is sent as the choice's finish reason instead (default "stop"). It may sleep: the server
 # handles requests on separate threads.
 Responder = Callable[[dict[str, Any]], tuple[str, dict[str, Any]]]
 
@@ -45,6 +46,8 @@ def stub_server(respond: Responder) -> Iterator[Stub]:
             stub.headers.append({k.lower(): v for k, v in self.headers.items()})
             try:
                 content, usage_extra = respond(body)
+                usage_extra = dict(usage_extra)
+                finish_reason = usage_extra.pop("finish_reason", "stop")
             except StubError as e:
                 err = json.dumps({"error": {"message": f"stub {e.status}"}}).encode()
                 self.send_response(e.status)
@@ -64,7 +67,7 @@ def stub_server(respond: Responder) -> Iterator[Stub]:
                     {
                         "index": 0,
                         "message": {"role": "assistant", "content": content},
-                        "finish_reason": "stop",
+                        "finish_reason": finish_reason,
                     }
                 ],
                 "usage": {

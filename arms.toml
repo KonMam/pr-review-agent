@@ -26,6 +26,15 @@ model = "deepseek/deepseek-v4.1-flash"
 reports_cost = true
 price = { input_per_mtok = 0.051, output_per_mtok = 0.567 }  # fallback, 2026-11-06 list price
 temperature = 0.2
+# A reasoning model: hidden reasoning counts against max_tokens. In the
+# baseline (4096) a good reply used ~1.9k completion tokens for ~0.15k of JSON,
+# and 16/123 reviews were cut off twice. On some cases the reasoning loops and
+# never ends: sarama-9f8650a used all of 16384 on reasoning. OpenRouter's
+# reasoning.max_tokens and effort = "low" were both ignored (still 8192 of
+# reasoning, 2026-11-06), so: room for long-but-finite reasoning, then one
+# retry with reasoning off for a reply that is still cut off.
+max_tokens = 8192
+truncation_extra_body = { reasoning = { enabled = false } }
 extra_body = { provider = { data_collection = "deny" }, usage = { include = true } }
 # App attribution, so OpenRouter's Activity page names this app instead of
 # "Unknown". X-OpenRouter-Title is the current name (X-Title is the legacy one).

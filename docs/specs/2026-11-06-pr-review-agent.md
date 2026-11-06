@@ -73,7 +73,7 @@ One item per session and PR.
 - [x] 1. **Case format and scorer:** the manifest schema, loader, matching rule, and P/R/F1 with unit tests on fixtures. No model calls. Update AGENTS.md, which still says "Claude Agent SDK" and "LiteLLM gateway", to match the Decisions below.
 - [x] 2. **Golden set:** a script that turns a fix commit into a case (revert the fix → buggy diff, fix hunks → ground truth). Curate 30-50 Go cases from my Go repos and from permissively licensed OSS Go repos, tagged by bug class. Add the manifest validation test.
 - [x] 3. **Agent v0:** the `arms.toml` loader, a single-pass generator, the budget guard, and `eval` with repeated runs, caching, cost and latency. Run it with the cheapest arm to get the first baseline.
-- [ ] 4. **Multi-stage pipeline:** grade, dedup and suppress, each toggleable, plus the threshold sweep and the ablation table.
+- [x] 4. **Multi-stage pipeline:** grade, dedup and suppress, each toggleable, plus the threshold sweep and the ablation table. Results are in the Pipeline section below.
 - [ ] 5. **Model ladder:** rerun the best pipeline on 2-3 arms from cheapest to stronger, to see whether a stronger model buys enough precision or recall to justify its cost. Also try read-only tools as an ablation.
 - [ ] 6. **CodeRabbit arm:** a public sandbox GitHub repo with one PR per case. Collect CodeRabbit's comments, normalise them to findings, and score them. **This needs my OK before any remote is created or anything is pushed.**
 - [ ] 7. **`docs/build-vs-buy.md`:** the comparison table, the hand-check results, and the recommendation.
@@ -93,6 +93,56 @@ First paid run, 2026-11-06, run id `baseline-or-deepseek-flash` (arm `or-deepsee
 - **Latency:** p50 11.9 s, p95 50.6 s.
 - **Own-repo slice (3 cases, 6 bugs):** P 1.00, R 0.44 (0.33-0.50), F1 0.61 (0.50-0.67). **OSS (38 cases, 52 bugs):** P 0.99 (0.97-1.00), R 0.67 (0.60-0.73), F1 0.80 (0.74-0.84). These slices were computed from `reviews.jsonl` with the same scorer; `summary.json` doesn't break them out yet.
 - **Errors:** no case errored. 17 of 123 reviews (14%) came back malformed after the retry and count as zero findings. 16 of them used the full 4096-token `max_tokens` on both attempts, which means the reply was cut off. The affected cases are sarama-9f8650a (3/3), sarama-05cb9fa, badger-7ceb365, badger-89689ef and echo-05df10c (2/3 each), and go-taskqueue-aac3b48, go-taskqueue-f8d74eb, kafka-go-ed22f4e, go-redis-9b33d16, echo-02de901 and prometheus-08baa43 (1/3 each). This caps recall, so it should be looked at before item 4's numbers are compared with this baseline.
+
+## Pipeline (item 4)
+
+Run 2026-11-06 on arm `or-deepseek-flash`, 41 cases × 3 runs, run ids `p4-single-pass` and `p4-pipeline-final`. Generate stage is `generate-43defae9ada5` with arm config hash `607b939d893a4b93`, and grade stage is `grade-39d6a9243a11`. Grade uses the same arm as generate. Spend for the item was about $0.93 of the $3 allowed: $0.52 for generate, $0.38 for grade and about $0.03 for probes. Every row below comes from the same stored replies.
+
+**Truncation fixed first.** Hidden reasoning was eating `max_tokens`, not the reply. A good baseline reply used about 1.9k completion tokens to produce about 0.15k tokens of JSON. On some cases the reasoning never converges: sarama-9f8650a spent all of 16,384 tokens on reasoning and produced no answer. OpenRouter ignored both `reasoning.max_tokens` and `effort = "low"`, and each still ran to 8,192 tokens of reasoning. The fix has two parts:
+- `max_tokens` goes up to 8192.
+- A new per-arm `truncation_extra_body = { reasoning = { enabled = false } }` resends a cut-off reply once with reasoning off (`ask.py`).
+
+The result: 26 of 369 generate attempts were cut off, every one was recovered, and 0 of 123 reviews were malformed (the baseline had 17). Recall rose from 0.649 to 0.787 with nothing else changed. The new single-pass row replaces the baseline as the reference.
+
+**Ablation** (P/R/F1 are mean and min-max over 3 runs; latency covers all calls in a review):
+
+| Row | Precision | Recall | F1 | Findings/review | Cost/review | p50 / p95 |
+|---|---|---|---|---|---|---|
+| single-pass | 0.993 (0.979-1.000) | 0.787 (0.759-0.828) | 0.878 (0.863-0.906) | 1.12 | $0.0042 | 16.2 s / 61.1 s |
+| + grade (0.3) | 1.000 (1.000-1.000) | 0.741 (0.707-0.776) | 0.851 (0.828-0.874) | 1.05 | $0.0073 | 30.9 s / 83.5 s |
+| + grade + dedup | 1.000 (1.000-1.000) | 0.741 (0.707-0.776) | 0.851 (0.828-0.874) | 1.05 | $0.0073 | 30.9 s / 83.5 s |
+| + grade + dedup + suppress | 1.000 (1.000-1.000) | 0.741 (0.707-0.776) | 0.851 (0.828-0.874) | 1.05 | $0.0073 | 30.9 s / 83.5 s |
+
+**Grade threshold sweep** (means; dedup and suppress also applied):
+
+| Threshold | P | R | F1 | Findings/review |
+|---|---|---|---|---|
+| 0.0 (no drop) | 0.993 | 0.787 | 0.878 | 1.12 |
+| 0.1-0.3 | 1.000 | 0.741 | 0.851 | 1.05 |
+| 0.4 | 1.000 | 0.695 | 0.820 | 0.98 |
+| 0.5-0.7 | 1.000 | 0.690 | 0.816 | 0.98 |
+| 0.8 | 1.000 | 0.529 | 0.691 | 0.74 |
+| 0.9 | 1.000 | 0.471 | 0.640 | 0.66 |
+| 1.0 | 1.000 | 0.437 | 0.606 | 0.61 |
+
+The default threshold is **0.3**, the highest recall at the sweep's best precision. That choice rests on a single false positive: it was tuned on the same 41 cases it's scored on, and the location-level false positive it removes is the only one across all 3 runs (echo-02de901, graded 0.0).
+
+**Reading it:**
+- **Grade isn't worth it on this set, as currently measured.** It removes 1 location-level false positive and buys +0.007 precision. To do that it drops 17 of 137 matched candidates at 0.5, or 7% of recall at 0.3, and it adds $0.003 per review and doubles p50.
+  - On a quick read, the dropped matches look like correct claims: go-redis-9b33d16's `append` aliasing, and kafka-go-b0b1cdc's context dropped for `context.Background()`. The grader mostly scores "depends on unseen code" as 0.3 instead of the rubric's 0.7.
+  - The location-only scorer (next point) can't credit grade with removing right-place, wrong-reason findings, so the hand-check in item 7 has to settle this.
+  - Recommendation for item 5: rerun single-pass + dedup + suppress (both free), with grade as an ablation and not the default.
+- **Dedup and suppress change nothing here.** The model gives about one finding per review (single-pass: 10 reviews with 0, 97 with 1, 7 with 2, 9 with 3), and overlapping same-category duplicates don't occur.
+  - The generator's category list has no style categories, so `suppressed_category_findings` is 0 even without the suppress stage.
+  - Both stages stay as cheap guards. The spec's no-style test runs on stored stub results in `tests/test_pipeline.py`, and every summary reports `suppressed_category_findings`. It is 0 for both real runs.
+- **Slices (full pipeline):** own-repo (3 cases) P 1.000, R 0.778 (0.500-1.000). OSS (38 cases) P 1.000, R 0.737 (0.712-0.769).
+- **Findings per case** for every row are in `summary.json` (`findings_per_case`). Cases averaging more than 1 finding in single-pass: go-redis-9b33d16 (3), go-taskqueue-aac3b48, go-taskqueue-f8d74eb, kafka-go-ed22f4e and echo-05df10c (2 each), sarama-9f8650a (1.67), fasthttp-3aa09fe and echo-02de901 (1.33). With the full pipeline, badger-89689ef and bbolt-53a930f get no finding in any run.
+
+**Precision is inflated (flag for item 7's hand-check; the scorer is unchanged).** The diffs are 14-74 lines including context, but the median diff changes only **5** lines (1-34). With ±3-line matching, a finding placed on a random changed line would match a bug **89%** of the time (mean over cases; the median case is 100%, and 38 of 41 cases are at 50% or more). So P ≈ 0.99-1.00 mostly measures "points at the changed lines", not "names the right defect". This is also why grade looks bad here: right-place, wrong-reason findings count as true positives. Item 7's hand-check of sampled true positives is the real precision number for both arms, and it should sample findings that grade dropped as well as ones it kept.
+
+**Other notes:**
+- One generate call in `p4-single-pass` cost $0.01116 against a $0.01092 reservation: OpenRouter routed it above twice the list price. The overshoot was small and the run stayed far under its cap, but `REPORTED_COST_MARGIN = 2.0` isn't a strict bound for this arm.
+- The grader uses the same reasoning arm: 127 calls for 113 graded reviews, with 14 cut-offs recovered by the same fallback and 0 malformed.
 
 ## Decisions
 

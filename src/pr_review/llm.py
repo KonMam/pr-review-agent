@@ -132,6 +132,8 @@ class Reply:
     latency_s: float  # the successful attempt only
     retries: int = 0  # 429/5xx retries before it
     retry_wait_s: float = 0.0  # failed attempts plus backoff, kept apart
+    finish_reason: str = ""  # "length" when the reply hit max_tokens
+    reasoning_tokens: int = 0  # hidden reasoning, counted in completion_tokens
 
 
 def make_client(arm: Arm) -> OpenAI:
@@ -172,11 +174,22 @@ def chat(
     arm: Arm,
     messages: list[ChatCompletionMessageParam],
     budget: Budget,
+    *,
+    extra_body: dict[str, Any] | None = None,
 ) -> Reply:
-    """Send one chat request within a budget reservation, retrying 429 and 5xx."""
+    """Send one chat request within a budget reservation, retrying 429 and 5xx.
+
+    `extra_body` replaces the arm's `extra_body` for this request only.
+    """
     reserved = budget.reserve(worst_case_cost(arm, messages))
     try:
-        reply = _send(client, arm, messages, budget.cancelled)
+        reply = _send(
+            client,
+            arm,
+            messages,
+            budget.cancelled,
+            arm.extra_body if extra_body is None else extra_body,
+        )
     except (APIStatusError, Cancelled):
         # The provider refused the request, or we never resent it: not billed.
         budget.settle(reserved, 0.0, failed=True)
@@ -195,14 +208,15 @@ def _send(
     arm: Arm,
     messages: list[ChatCompletionMessageParam],
     cancelled: threading.Event,
+    extra_body: dict[str, Any],
 ) -> Reply:
     options: dict[str, Any] = {}
     if arm.temperature is not None:
         options["temperature"] = arm.temperature
     if arm.json_mode:
         options["response_format"] = {"type": "json_object"}
-    if arm.extra_body:
-        options["extra_body"] = arm.extra_body
+    if extra_body:
+        options["extra_body"] = extra_body
     first_started = time.perf_counter()
     retries = 0
     while True:
@@ -225,6 +239,8 @@ def _send(
     completion_tokens = usage.completion_tokens if usage else 0
     cost = _cost(arm, usage, prompt_tokens, completion_tokens)
     content = resp.choices[0].message.content if resp.choices else None
+    finish_reason = (resp.choices[0].finish_reason or "") if resp.choices else ""
+    details = usage.completion_tokens_details if usage else None
     return Reply(
         content=content or "",
         prompt_tokens=prompt_tokens,
@@ -233,6 +249,8 @@ def _send(
         latency_s=latency,
         retries=retries,
         retry_wait_s=started - first_started if retries else 0.0,
+        finish_reason=finish_reason,
+        reasoning_tokens=(details.reasoning_tokens or 0) if details else 0,
     )
 
 

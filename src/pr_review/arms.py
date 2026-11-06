@@ -53,6 +53,11 @@ class Arm(BaseModel):
     # Sent as-is in the request body, e.g. OpenRouter's `provider` routing
     # options (`data_collection = "deny"`).
     extra_body: dict[str, Any] = Field(default_factory=dict)
+    # Merged over `extra_body` (top-level keys replaced) for the one retry
+    # after a reply is cut off at `max_tokens`, e.g. OpenRouter's
+    # `reasoning = { enabled = false }` when hidden reasoning ate the cap.
+    # Empty: a cut-off reply gets the ordinary malformed-reply retry.
+    truncation_extra_body: dict[str, Any] = Field(default_factory=dict)
     # Sent as HTTP headers on every request, e.g. OpenRouter's app attribution
     # (`HTTP-Referer`, `X-OpenRouter-Title`). Not part of `config_hash`.
     extra_headers: dict[str, str] = Field(default_factory=dict)
