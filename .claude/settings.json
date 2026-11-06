@@ -1,0 +1,36 @@
+{
+  "extraKnownMarketplaces": {
+    "konmam": {
+      "source": {
+        "source": "directory",
+        "path": "/Users/konstantinas.m/projects/agent-harness"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "harness@konmam": true
+  },
+  "permissions": {
+    "allow": [
+      "Bash(./verify.sh)",
+      "Bash(git status*)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(git show*)",
+      "Bash(git branch --show-current)",
+      "Bash(gh pr view*)",
+      "Bash(gh pr list*)",
+      "Bash(gh pr checks*)"
+    ],
+    "deny": [
+      "Bash(git push *main*)",
+      "Bash(git push *:main*)",
+      "Bash(git push --force*)",
+      "Bash(gh secret*)",
+      "Bash(gh auth token*)",
+      "Bash(gh api *merge*)",
+      "Read(./.env)",
+      "Read(./.env.*)"
+    ]
+  }
+}
