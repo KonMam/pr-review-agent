@@ -2,7 +2,7 @@
 
 ## Project
 
-A model-agnostic, precision-first PR reviewer for the owner's Go code, with an offline eval set of reverted Go bug-fix commits scored on precision and recall, and a head-to-head against CodeRabbit. Prep POC for the Decodo internal AI platform role. Owner: Konstantinas. Status: case manifest schema, loader and scorer exist (`models.py`, `manifest.py`, `scoring.py`); no golden set or model calls yet. See `docs/specs/` for the plan. Anything marked *(planned)* doesn't exist yet; don't claim it runs until it does, and update this file when it lands.
+A model-agnostic, precision-first PR reviewer for the owner's Go code, with an offline eval set of reverted Go bug-fix commits scored on precision and recall, and a head-to-head against CodeRabbit. Prep POC for the Decodo internal AI platform role. Owner: Konstantinas. Status: case manifest schema, loader and scorer exist (`models.py`, `manifest.py`, `scoring.py`), and the golden set is in `cases/` (41 cases, built by `make_case.py` and `cases/build.sh`); no model calls yet. See `docs/specs/` for the plan. Anything marked *(planned)* doesn't exist yet; don't claim it runs until it does, and update this file when it lands.
 
 ## Commands
 
@@ -39,6 +39,7 @@ Before saying any change is done, run `./verify.sh`. A Stop hook runs it too and
 | `src/pr_review/` | the agent and the eval harness |
 | `tests/` | unit tests (`verify.sh` runs them) |
 | `docs/specs/` | specs: acceptance criteria, out of scope, plan |
+| `cases/` | golden set: manifest, buggy diffs, base files (see its README) |
 | `results/`, `cache/` | eval outputs and cached API responses (gitignored) |
 
 ## Known Mistakes

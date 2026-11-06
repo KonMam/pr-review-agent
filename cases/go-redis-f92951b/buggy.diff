@@ -1,0 +1,15 @@
+diff --git a/internal/internal.go b/internal/internal.go
+index 4a59c59..735d6af 100644
+--- a/internal/internal.go
++++ b/internal/internal.go
+@@ -15,10 +15,6 @@ func RetryBackoff(retry int, minBackoff, maxBackoff time.Duration) time.Duration
+ 	}
+ 
+ 	d := minBackoff << uint(retry)
+-	if d < minBackoff {
+-		return maxBackoff
+-	}
+-
+ 	d = minBackoff + time.Duration(rand.Int63n(int64(d)))
+ 
+ 	if d > maxBackoff || d < minBackoff {

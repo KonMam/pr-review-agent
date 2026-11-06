@@ -1,0 +1,16 @@
+diff --git a/client.go b/client.go
+index c209794..26e6037 100644
+--- a/client.go
++++ b/client.go
+@@ -1093,10 +1093,9 @@ func clientGetURLDeadline(dst []byte, url string, deadline time.Time, c clientDo
+ 	go func() {
+ 		req := AcquireRequest()
+ 
+-		statusCodeCopy, bodyCopy, errCopy := doRequestFollowRedirectsBuffer(req, nil, url, c)
++		statusCodeCopy, bodyCopy, errCopy := doRequestFollowRedirectsBuffer(req, dst, url, c)
+ 		mu.Lock()
+ 		if !timedout {
+-			bodyCopy = append(dst[:0], bodyCopy...)
+ 			ch <- clientURLResponse{
+ 				statusCode: statusCodeCopy,
+ 				body:       bodyCopy,

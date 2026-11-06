@@ -1,0 +1,26 @@
+diff --git a/tx.go b/tx.go
+index 3c4b144..57c4d5a 100644
+--- a/tx.go
++++ b/tx.go
+@@ -317,11 +317,7 @@ func (tx *Tx) WriteTo(w io.Writer) (n int64, err error) {
+ 	if err != nil {
+ 		return 0, err
+ 	}
+-	defer func() {
+-		if cerr := f.Close(); err == nil {
+-			err = cerr
+-		}
+-	}()
++	defer func() { _ = f.Close() }()
+ 
+ 	// Generate a meta page. We use the same page data for both meta pages.
+ 	buf := make([]byte, tx.db.pageSize)
+@@ -360,7 +356,7 @@ func (tx *Tx) WriteTo(w io.Writer) (n int64, err error) {
+ 		return n, err
+ 	}
+ 
+-	return n, nil
++	return n, f.Close()
+ }
+ 
+ // CopyFile copies the entire database to file at the given path.

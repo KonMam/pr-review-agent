@@ -1,0 +1,15 @@
+diff --git a/context.go b/context.go
+index a6add8a..788b00b 100644
+--- a/context.go
++++ b/context.go
+@@ -132,8 +132,9 @@ func (c *Context) Copy() *Context {
+ 	cp.handlers = nil
+ 	cp.fullPath = c.fullPath
+ 
++	cKeys := c.Keys
+ 	c.mu.RLock()
+-	cp.Keys = maps.Clone(c.Keys)
++	cp.Keys = maps.Clone(cKeys)
+ 	c.mu.RUnlock()
+ 
+ 	cParams := c.Params

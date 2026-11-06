@@ -1,0 +1,49 @@
+diff --git a/echo.go b/echo.go
+index c2f23c1..5b30872 100644
+--- a/echo.go
++++ b/echo.go
+@@ -732,7 +732,7 @@ func (e *Echo) StartServer(s *http.Server) (err error) {
+ 	return s.Serve(e.Listener)
+ }
+ 
+-func (e *Echo) configureServer(s *http.Server) error {
++func (e *Echo) configureServer(s *http.Server) (err error) {
+ 	// Setup
+ 	e.colorer.SetOutput(e.Logger.Output())
+ 	s.ErrorLog = e.StdLogger
+@@ -747,11 +747,10 @@ func (e *Echo) configureServer(s *http.Server) error {
+ 
+ 	if s.TLSConfig == nil {
+ 		if e.Listener == nil {
+-			l, err := newListener(s.Addr, e.ListenerNetwork)
++			e.Listener, err = newListener(s.Addr, e.ListenerNetwork)
+ 			if err != nil {
+ 				return err
+ 			}
+-			e.Listener = l
+ 		}
+ 		if !e.HidePort {
+ 			e.colorer.Printf("⇨ http server started on %s\n", e.colorer.Green(e.Listener.Addr()))
+@@ -792,7 +791,7 @@ func (e *Echo) TLSListenerAddr() net.Addr {
+ }
+ 
+ // StartH2CServer starts a custom http/2 server with h2c (HTTP/2 Cleartext).
+-func (e *Echo) StartH2CServer(address string, h2s *http2.Server) error {
++func (e *Echo) StartH2CServer(address string, h2s *http2.Server) (err error) {
+ 	e.startupMutex.Lock()
+ 	// Setup
+ 	s := e.Server
+@@ -809,12 +808,11 @@ func (e *Echo) StartH2CServer(address string, h2s *http2.Server) error {
+ 	}
+ 
+ 	if e.Listener == nil {
+-		l, err := newListener(s.Addr, e.ListenerNetwork)
++		e.Listener, err = newListener(s.Addr, e.ListenerNetwork)
+ 		if err != nil {
+ 			e.startupMutex.Unlock()
+ 			return err
+ 		}
+-		e.Listener = l
+ 	}
+ 	if !e.HidePort {
+ 		e.colorer.Printf("⇨ http server started on %s\n", e.colorer.Green(e.Listener.Addr()))

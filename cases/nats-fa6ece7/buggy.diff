@@ -1,0 +1,20 @@
+diff --git a/nats.go b/nats.go
+index b96bd4c..e11136a 100644
+--- a/nats.go
++++ b/nats.go
+@@ -516,13 +516,12 @@ func (o Options) Connect() (*Conn, error) {
+ 
+ 	// Create the async callback channel.
+ 	nc.ach = make(chan asyncCB, asyncCBChanSize)
++	// Spin up the async cb dispatcher.
++	go nc.asyncDispatch()
+ 
+ 	if err := nc.connect(); err != nil {
+ 		return nil, err
+ 	}
+-
+-	go nc.asyncDispatch()
+-
+ 	return nc, nil
+ }
+ 

@@ -1,0 +1,40 @@
+diff --git a/kafka.go b/kafka.go
+index 41527b3..8b7e66d 100644
+--- a/kafka.go
++++ b/kafka.go
+@@ -241,11 +241,6 @@ func (kafka *kafkaReader) getOffset(ctx context.Context, offset int64) (int64, e
+ 
+ 	select {
+ 	case <-ctx.Done():
+-		select {
+-		case <-errs:
+-		case <-val:
+-		}
+-
+ 		return 0, ctx.Err()
+ 	case err := <-errs:
+ 		return 0, err
+@@ -288,11 +283,6 @@ func (kafka *kafkaReader) getMessages(ctx context.Context, offset int64) (*saram
+ 
+ 	select {
+ 	case <-ctx.Done():
+-		select {
+-		case <-errs:
+-		case <-val:
+-		}
+-
+ 		return nil, ctx.Err()
+ 	case err := <-errs:
+ 		return nil, err
+@@ -319,11 +309,6 @@ func (kafka *kafkaReader) getLeader(ctx context.Context) (*sarama.Broker, error)
+ 
+ 	select {
+ 	case <-ctx.Done():
+-		select {
+-		case <-errs:
+-		case <-val:
+-		}
+-
+ 		return nil, ctx.Err()
+ 	case err := <-errs:
+ 		return nil, err

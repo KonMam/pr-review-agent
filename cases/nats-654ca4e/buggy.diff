@@ -1,0 +1,24 @@
+diff --git a/js.go b/js.go
+index 614ef22..def5941 100644
+--- a/js.go
++++ b/js.go
+@@ -2835,15 +2835,12 @@ func ConsumerFilterSubjects(subjects ...string) SubOpt {
+ func (sub *Subscription) ConsumerInfo() (*ConsumerInfo, error) {
+ 	sub.mu.Lock()
+ 	// TODO(dlc) - Better way to mark especially if we attach.
+-	if sub.jsi == nil {
+-		sub.mu.Unlock()
+-		return nil, ErrTypeSubscription
+-	} else if sub.jsi.consumer == _EMPTY_ {
+-		ordered := sub.jsi.ordered
+-		sub.mu.Unlock()
+-		if ordered {
++	if sub.jsi == nil || sub.jsi.consumer == _EMPTY_ {
++		if sub.jsi.ordered {
++			sub.mu.Unlock()
+ 			return nil, ErrConsumerInfoOnOrderedReset
+ 		}
++		sub.mu.Unlock()
+ 		return nil, ErrTypeSubscription
+ 	}
+ 

@@ -1,0 +1,13 @@
+diff --git a/commands.go b/commands.go
+index d0d9dfa..51b2064 100644
+--- a/commands.go
++++ b/commands.go
+@@ -707,7 +707,7 @@ func (c cmdable) ReplicaOf(ctx context.Context, host, port string) *StatusCmd {
+ }
+ 
+ func (c cmdable) SlowLogGet(ctx context.Context, num int64) *SlowLogCmd {
+-	cmd := NewSlowLogCmd(ctx, "slowlog", "get", num)
++	cmd := NewSlowLogCmd(context.Background(), "slowlog", "get", num)
+ 	_ = c(ctx, cmd)
+ 	return cmd
+ }

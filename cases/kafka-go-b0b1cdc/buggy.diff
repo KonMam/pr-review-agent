@@ -1,0 +1,26 @@
+diff --git a/transport.go b/transport.go
+index 50f7c0c..a163e0b 100644
+--- a/transport.go
++++ b/transport.go
+@@ -897,7 +897,7 @@ func (g *connGroup) grabConnOrConnect(ctx context.Context) (*conn, error) {
+ 		errChan := make(chan error)
+ 
+ 		go func() {
+-			c, err := g.connect(ctx)
++			c, err := g.connect()
+ 			if err != nil {
+ 				select {
+ 				case errChan <- err:
+@@ -991,10 +991,10 @@ func (g *connGroup) releaseConn(c *conn) bool {
+ 	return true
+ }
+ 
+-func (g *connGroup) connect(ctx context.Context) (*conn, error) {
++func (g *connGroup) connect() (*conn, error) {
+ 	deadline := time.Now().Add(g.pool.dialTimeout)
+ 
+-	ctx, cancel := context.WithDeadline(ctx, deadline)
++	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+ 	defer cancel()
+ 
+ 	netConn, err := g.pool.dial(ctx, g.network, g.address)
