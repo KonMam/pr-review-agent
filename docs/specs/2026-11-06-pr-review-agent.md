@@ -68,7 +68,8 @@ These same classes are the tags on golden-set cases.
 - Precision = findings matching some bug / all findings after dedup.
 - Recall = bugs matched by at least one finding / all bugs.
 - **Clean cases** have no bugs, so every finding on one is a false positive: it counts in precision's denominator and adds nothing to recall. The summary also reports a false-positive rate on clean cases: findings per clean review, and the share of clean reviews with any finding. Numbers are reported for bug cases only, clean cases only and the combined set.
-- Location-only matching overcounts a little: a finding on the right lines can still give the wrong reason. To bound this, I hand-check 20 sampled true positives per arm and report the share that were wrong.
+- Location-only matching overcounts: a finding on the right lines can still give the wrong reason, and with a median of 5 changed lines it rarely misses the lines (item 4). To bound this, a **claim judge** checks every location-matched finding: a model from another family than the reviewer reads the buggy diff, the fix (the buggy diff reversed) and the finding, and answers whether it describes the same defect as the fix. Each row reports a right-reason rate and claim-level precision and recall, counting only judge-confirmed matches.
+  - *Changed in item 7 (owner's decision):* this replaces hand-checking 20 sampled true positives per arm. The owner chose not to hand-label. A judge covers every match instead of a sample and can be rerun on any later arm for cents, but it is **not validated against human labels**; only its self-consistency is measured (a second verdict on a seeded sample of 40).
 
 **Runs and cost.**
 - Each case runs 3 times per configuration, because model output varies.
@@ -86,7 +87,7 @@ One item per session and PR.
 - [x] 4a. **Clean cases:** 20 bug-free commits added to the golden set so false positives are measurable, the scorer's false-positive rate, and item 4's ablation and sweep rerun on the combined set. Results are in the Clean cases section below.
 - [x] 5. **Model ladder:** rerun the best pipeline on 2-3 arms from cheapest to stronger, to see whether a stronger model buys enough precision or recall to justify its cost. Also try read-only tools as an ablation. Results are in the Model ladder section below; the strong tier didn't fit the budget and has an estimate instead.
 - [x] 6. **CodeRabbit arm:** a public sandbox GitHub repo with one PR per case. Collect CodeRabbit's comments, normalise them to findings, and score them. **This needs my OK before any remote is created or anything is pushed.** Results are in the CodeRabbit section below.
-- [ ] 7. **`docs/build-vs-buy.md`:** the comparison table, the hand-check results, and the recommendation.
+- [x] 7. **`docs/build-vs-buy.md`:** the comparison table, the claim-judge results (in place of the hand-check, see Matching rule), and the recommendation. Results are in the Build vs buy section below and in [`docs/build-vs-buy.md`](../build-vs-buy.md).
 - [ ] 8. **CI on one Go repo:** a GitHub Action, defined in this repo, that reviews a Go repo's PRs with inline comments. This is the "would I actually use it" check. It runs on one of my Go repos, and wiring it in there **needs my OK first**, since it touches an existing project. One repo only.
   - Every CI review also writes a JSONL log of each posted finding and uploads it as a workflow artifact. Each record has repo, PR number, head SHA, file, line range, category, claim, arm/model id, prompt and stage versions, and grade score if graded. This is the input to item 9, so it ships from the first CI run.
 - [ ] 9. **Feedback loop:** learn from real use on that one repo. Needs item 8's log. Traffic on my repos is low (a handful of PRs a month), so the realistic loop is a **weekly hand-read** of the logged findings plus promotions; the automated signals are a bonus, not something to wait on.
@@ -316,7 +317,32 @@ The CodeRabbit rows come from `score --exclude nats-clean-b5bc7b4 --out summary-
   - The trial plan is Advanced, not the free OSS plan a public repo would normally get.
   - Latency includes queueing from opening 61 PRs at once.
   - CodeRabbit's pre-merge "title check" flagged every generic "Case NNN" title. That's a check, not a finding, and wasn't scored.
-- Item 7 should hand-check 20 sampled CodeRabbit true positives too, and its clean-case comments.
+- Item 7 should hand-check 20 sampled CodeRabbit true positives too, and its clean-case comments. *(Superseded: item 7 used the claim judge instead; see Matching rule.)*
+
+## Build vs buy (item 7)
+
+Run 2026-11-06. The write-up is [`docs/build-vs-buy.md`](../build-vs-buy.md); this section records how it was made.
+
+- **Claim judge in place of the hand-check** (owner's decision; see Matching rule). `pr-review judge` (`judge.py`) gives the arm `or-judge-luna` (`openai/gpt-6-luna`, another family from the DeepSeek reviewer, `data_collection = "deny"`, attribution headers) the buggy diff, the fix (the buggy diff reversed) and the finding's text. It asks whether the finding describes the same defect as the fix. Only location-matched findings on bug cases are judged.
+  - CodeRabbit findings are judged on the comment's prose: the title and explanation, without the proposed patch. `coderabbit.py` now keeps it as `detail` in `findings.json`. The scores are unchanged.
+  - Verdicts are cached per (judge arm, prompt version, case, finding, sample), so rows that share a finding share its verdict.
+  - The single-pass row is rebuilt from `l5-flash-60`'s candidates through dedup and suppress (`agent-no-grade`). It reproduces item 5's location numbers exactly.
+- **Run.** 309 distinct findings, plus a second verdict on a seeded 40, on the same 60 cases as items 5 and 6. Command: `pr-review judge --arm or-judge-luna --exclude nats-clean-b5bc7b4 --repeat 40 --max-rpm 15 --row ...`. The output is `results/judge/judge.json`.
+  - 0 malformed verdicts.
+  - Spend **$0.044**, against a $1.50 allowance and a `--budget-usd 0.5` cap.
+  - OpenRouter limits new accounts to 20 requests a minute on this model, so `--max-rpm` paces the calls.
+
+| Row | Right-reason rate | Claim P | Claim R | Claim F1 | Location F1 |
+|---|---|---|---|---|---|
+| flash single-pass + dedup + suppress | 0.971 (133/137) | 0.930 | 0.764 | 0.839 | 0.864 |
+| flash + grade (0.3) | 0.984 (127/129) | 0.970 | 0.730 | 0.833 | 0.846 |
+| flash + read-only tools | 0.985 (133/135) | 0.963 | 0.776 | 0.859 | 0.872 |
+| CodeRabbit, all comments | 1.000 (37/37) | 0.698 | 0.621 | 0.657 | 0.657 |
+| CodeRabbit, Major or Critical | 1.000 (34/34) | 0.810 | 0.569 | 0.668 | 0.668 |
+
+- **Self-consistency.** 39 of 40 repeated verdicts agree (0.975). Kappa is 0 because the first pass said yes to all 40, so this doesn't show the judge can discriminate.
+- **The judge has not been checked against human labels.** It rejected 6 of 309 findings. Some rejections look right (a claim that the buggy removal is "fine"). At least three look too strict (go-taskqueue-f8d74eb race findings).
+- **Grade, settled as far as the judge can settle it.** Grade drops 8 location matches over 3 runs: the judge confirms 6 of them and rejects 2. So grade isn't mainly removing wrong-reason findings, and it stays off by default.
 
 ## Decisions
 

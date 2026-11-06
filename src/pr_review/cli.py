@@ -1,11 +1,13 @@
-"""Command line: `pr-review eval --arm <name> --runs N`."""
+"""Command line: `pr-review eval --arm <name> --runs N`, `snapshot`, `judge`."""
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
 from pr_review.arms import ArmsError, load_arm
 from pr_review.evaluate import DEFAULT_CONCURRENCY, base_dir, run_eval
+from pr_review.judge import Row, load_agent_row, load_coderabbit_row, run_judge
 from pr_review.llm import DEFAULT_BUDGET_USD, Budget, BudgetExceeded, CostUnknown
 from pr_review.manifest import ManifestError, load_manifest
 from pr_review.snapshot import build_snapshot, clone_dir
@@ -107,10 +109,60 @@ def main(argv: list[str] | None = None) -> int:
         help="where the owner's repos are cloned (read only)",
     )
     sn.add_argument("--out", type=Path, default=Path("cache/snapshots"))
+    ju = sub.add_parser(
+        "judge",
+        help="ask a judge arm whether each location-matched finding names the "
+        "ground-truth defect; scores rows at location and claim level",
+    )
+    ju.add_argument("--arm", required=True, help="judge arm in the arms file")
+    ju.add_argument(
+        "--row",
+        action="append",
+        required=True,
+        metavar="LABEL=KIND:PATH",
+        help="a row to score (repeatable). KIND is agent (a reviews.jsonl), "
+        "agent-no-grade (a graded run's reviews.jsonl without the grade stage), "
+        "coderabbit (findings.json, all comments) or coderabbit-major "
+        "(Major or Critical only)",
+    )
+    ju.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        metavar="ID",
+        help="leave this case out of every row (repeatable)",
+    )
+    ju.add_argument(
+        "--repeat",
+        type=int,
+        default=0,
+        help="judge this many distinct findings a second time (seeded sample) "
+        "and report agreement (default 0)",
+    )
+    ju.add_argument("--arms-file", type=Path, default=Path("arms.toml"))
+    ju.add_argument("--manifest", type=Path, default=Path("cases/manifest.jsonl"))
+    ju.add_argument("--root", type=Path, default=Path("."))
+    ju.add_argument("--cache-dir", type=Path, default=Path("cache/replies"))
+    ju.add_argument("--out", type=Path, required=True, help="where judge.json goes")
+    ju.add_argument(
+        "--budget-usd",
+        type=float,
+        default=DEFAULT_BUDGET_USD,
+        help=f"hard spend limit for this run (default {DEFAULT_BUDGET_USD})",
+    )
+    ju.add_argument("--concurrency", type=int, default=DEFAULT_CONCURRENCY)
+    ju.add_argument(
+        "--max-rpm",
+        type=float,
+        default=None,
+        help="start at most this many judge calls a minute (provider rate caps)",
+    )
     args = parser.parse_args(argv)
 
     if args.command == "snapshot":
         return _snapshot(args)
+    if args.command == "judge":
+        return _judge(args)
 
     try:
         arm = load_arm(args.arms_file, args.arm)
@@ -192,6 +244,78 @@ def _snapshot(args: argparse.Namespace) -> int:
             return 2
         n = build_snapshot(case, clone, base_dir(case, args.root), args.out / case.id)
         print(f"{case.id}: {n} files")
+    return 0
+
+
+ROW_KINDS = ("agent", "agent-no-grade", "coderabbit", "coderabbit-major")
+
+
+def _load_row(spec: str) -> tuple[str, Row]:
+    label, sep, rest = spec.partition("=")
+    kind, sep2, path = rest.partition(":")
+    if not (sep and sep2 and label and path) or kind not in ROW_KINDS:
+        raise ValueError(
+            f"--row {spec!r}: expected LABEL=KIND:PATH, KIND one of {', '.join(ROW_KINDS)}"
+        )
+    p = Path(path)
+    if kind.startswith("agent"):
+        return label, load_agent_row(p, without_grade=kind == "agent-no-grade")
+    return label, load_coderabbit_row(p, serious_only=kind == "coderabbit-major")
+
+
+def _judge(args: argparse.Namespace) -> int:
+    try:
+        arm = load_arm(args.arms_file, args.arm)
+        cases = load_manifest(args.manifest)
+        unknown = set(args.exclude) - {c.id for c in cases}
+        if unknown:
+            raise ManifestError(f"unknown case ids: {', '.join(sorted(unknown))}")
+        cases = [c for c in cases if c.id not in args.exclude]
+        rows = dict(_load_row(spec) for spec in args.row)
+        diffs = {
+            c.id: (args.root / c.diff_path).read_text(encoding="utf-8") for c in cases
+        }
+    except (ArmsError, ManifestError, OSError, ValueError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    if (
+        args.budget_usd <= 0
+        or args.concurrency < 1
+        or args.repeat < 0
+        or (args.max_rpm is not None and args.max_rpm <= 0)
+    ):
+        print(
+            "error: --budget-usd, --concurrency and --max-rpm must be positive, "
+            "--repeat not negative",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        result = run_judge(
+            rows=rows,
+            cases=cases,
+            diffs=diffs,
+            arm=arm,
+            cache_dir=args.cache_dir,
+            budget=Budget(args.budget_usd),
+            repeat=args.repeat,
+            concurrency=args.concurrency,
+            max_rpm=args.max_rpm,
+        )
+    except BudgetExceeded as e:
+        print(
+            f"stopped: {e}. Paid verdicts are cached; rerun with a larger "
+            "--budget-usd to finish.",
+            file=sys.stderr,
+        )
+        return 3
+    except CostUnknown as e:
+        print(f"stopped: {e}", file=sys.stderr)
+        return 3
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    brief = {k: v for k, v in result.items() if k != "verdicts"}
+    print(json.dumps(brief, indent=2))
     return 0
 
 

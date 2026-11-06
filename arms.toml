@@ -112,3 +112,20 @@ temperature = 0.2
 max_tokens = 8192
 extra_body = { provider = { data_collection = "deny", quantizations = ["fp8", "bf16", "fp16", "unknown"], sort = "price", max_price = { prompt = 0.28, completion = 0.88 } }, usage = { include = true } }
 extra_headers = { HTTP-Referer = "https://github.com/KonMam/pr-review-agent", X-OpenRouter-Title = "pr-review-agent" }
+
+# --- Claim judge (item 7). Another family from the DeepSeek reviewer, so it
+# doesn't share the generator's blind spots. OpenAI's cheap tier: $0.10 in /
+# $0.50 out per million tokens (OpenRouter list, 2026-11-06); max_price keeps
+# it off the $0.20/$1.00 endpoint. No temperature: the model doesn't accept
+# one. A reasoning model, so effort stays low; a reply still cut off at
+# max_tokens is retried once with less reasoning.
+[arms.or-judge-luna]
+base_url = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_API_KEY"
+model = "openai/gpt-6-luna"
+reports_cost = true
+price = { input_per_mtok = 0.11, output_per_mtok = 0.55 }  # = max_price below
+max_tokens = 4096
+extra_body = { provider = { data_collection = "deny", max_price = { prompt = 0.11, completion = 0.55 } }, reasoning = { effort = "low" }, usage = { include = true } }
+truncation_extra_body = { reasoning = { effort = "minimal" } }
+extra_headers = { HTTP-Referer = "https://github.com/KonMam/pr-review-agent", X-OpenRouter-Title = "pr-review-agent" }

@@ -76,6 +76,7 @@ class Comment:
     category: str  # e.g. "Functional Correctness", "" if none
     tags: tuple[str, ...]  # the rest of the badge line (effort, tier)
     source: str  # "inline" or the review-body section
+    detail: str = ""  # the comment's prose, for the claim judge (`judge.py`)
 
     @property
     def serious(self) -> bool:
@@ -117,6 +118,36 @@ def claim(body: str) -> str:
     return "(no text)"
 
 
+DETAIL_MAX_CHARS = 1500
+_LINK_RE = re.compile(r"\(?\[([^\]]*)\]\([^)]*\)\)?")
+
+
+def detail(body: str) -> str:
+    """A comment's prose: its title and explanation, without the badge line,
+    HTML comments or collapsed `<details>` blocks (proposed fix, committable
+    suggestion, AI-agent prompt). Links keep their text only when it is not a
+    bare citation in parentheses. Capped at `DETAIL_MAX_CHARS`.
+    """
+    out: list[str] = []
+    depth = 0
+    for raw in body.splitlines():
+        opened, closed = raw.count("<details"), raw.count("</details>")
+        if depth or opened:
+            depth = max(0, depth + opened - closed)
+            continue
+        if raw.lstrip().startswith("<!--"):
+            continue
+        line = _plain(raw)
+        if not line or "·" in line or not line.strip("-"):
+            continue
+        line = _LINK_RE.sub(
+            lambda m: "" if m.group(0).startswith("(") else m.group(1), line
+        )
+        out.append(line.replace("**", "").strip())
+    text = " ".join(t for t in out if t)
+    return text[:DETAIL_MAX_CHARS]
+
+
 def _finding(file: str, lo: int, hi: int, category: str, text: str) -> Finding:
     lo, hi = sorted((lo, hi))
     return Finding(
@@ -141,7 +172,7 @@ def normalise_inline(c: Mapping[str, Any]) -> Comment | None:
     finding = None
     if end is not None and start is not None:
         finding = _finding(c["path"], int(start), int(end), category, body)
-    return Comment(finding, severity, category, tags, "inline")
+    return Comment(finding, severity, category, tags, "inline", detail(body))
 
 
 def normalise_review_body(body: str) -> list[Comment]:
@@ -168,7 +199,7 @@ def normalise_review_body(body: str) -> list[Comment]:
                 tags = (*tags, UNVERIFIED)
             if severity and not sec.startswith(SKIP_SECTIONS):
                 f = _finding(file, lo, hi, category, text)
-                out.append(Comment(f, severity, category, tags, sec))
+                out.append(Comment(f, severity, category, tags, sec, detail(text)))
         entry = None
 
     for raw in body.splitlines():
@@ -606,6 +637,7 @@ def cmd_score(args: argparse.Namespace) -> int:
                 "tags": list(c.tags),
                 "source": c.source,
                 "finding": c.finding.model_dump() if c.finding else None,
+                "detail": c.detail,
             }
             for c in cs
         ]
