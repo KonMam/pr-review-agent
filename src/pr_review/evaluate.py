@@ -4,14 +4,20 @@ Replies are cached by (case, arm config, stage, run index); the stage key
 includes the prompt version, so a prompt change re-runs and nothing else does.
 Cached reviews cost nothing this run but keep their original cost and latency,
 so the summary describes the reviews, not this invocation's spend.
+
+Uncached reviews run on a thread pool (`concurrency`); the budget reserves each
+call's worst case, so running calls together can't overshoot it. Reviews are
+written in (run index, manifest order) whatever order they finish in.
 """
 
 import hashlib
 import json
 import math
 import statistics
+import threading
 import time
 from collections.abc import Sequence
+from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -28,11 +34,12 @@ from pr_review.generate import (
     generate,
     read_base_files,
 )
-from pr_review.llm import Budget, make_client
+from pr_review.llm import Budget, Cancelled, make_client
 from pr_review.models import Case, Finding
 from pr_review.scoring import Score, score_case
 
 STAGE = f"generate-{PROMPT_VERSION}"
+DEFAULT_CONCURRENCY = 8
 
 
 class CachedReview(BaseModel):
@@ -49,6 +56,8 @@ class CachedReview(BaseModel):
     completion_tokens: int
     cost_usd: float
     latency_s: float
+    http_retries: int = 0  # 429/5xx retries
+    retry_wait_s: float = 0.0  # their failed attempts and backoff, not in latency_s
 
     @classmethod
     def from_result(
@@ -64,6 +73,8 @@ class CachedReview(BaseModel):
             completion_tokens=r.completion_tokens,
             cost_usd=r.cost_usd,
             latency_s=r.latency_s,
+            http_retries=r.retries,
+            retry_wait_s=r.retry_wait_s,
         )
 
 
@@ -156,14 +167,18 @@ def run_eval(
     budget: Budget,
     run_id: str | None = None,
     client: OpenAI | None = None,
+    concurrency: int = DEFAULT_CONCURRENCY,
 ) -> Path:
     """Run, score and write `results/<run-id>/`. Returns the summary path.
 
-    A `BudgetExceeded` stops the run; replies already paid for stay cached, so
-    rerunning with a larger budget only pays for the rest.
+    A `BudgetExceeded` (or any other error) stops scheduling new reviews; those
+    already in flight finish and are cached, so rerunning with a larger budget
+    only pays for the rest.
     """
     if runs < 1:
         raise ValueError("runs must be at least 1")
+    if concurrency < 1:
+        raise ValueError("concurrency must be at least 1")
     if not cases:
         raise ValueError("no cases")
     run_id = run_id or time.strftime("%Y%m%d-%H%M%S") + f"-{arm.name}"
@@ -173,19 +188,65 @@ def run_eval(
     cache = Cache(cache_dir)
 
     inputs = {c.id: review_input(c, root) for c in cases}
-    reviews: list[CachedReview] = []
-    fresh = 0
-    for run_index in range(runs):
-        for case in cases:
-            review = cache.get(case.id, inputs[case.id], arm, STAGE, run_index)
-            if review is None:
-                if client is None:
-                    client = make_client(arm)
-                result = generate(client, arm, inputs[case.id], budget)
-                review = CachedReview.from_result(case.id, run_index, result)
-                cache.put(inputs[case.id], arm, STAGE, review)
-                fresh += 1
-            reviews.append(review)
+    keys = [(run_index, case.id) for run_index in range(runs) for case in cases]
+    done: dict[tuple[int, str], CachedReview] = {}
+    todo: list[tuple[int, str]] = []
+    for run_index, case_id in keys:
+        cached = cache.get(case_id, inputs[case_id], arm, STAGE, run_index)
+        if cached is None:
+            todo.append((run_index, case_id))
+        else:
+            done[(run_index, case_id)] = cached
+
+    if todo:
+        live = client or make_client(arm)
+
+        # Set by the first failing review, before its worker can take another,
+        # so no review starts after a failure (with concurrency 1, as before).
+        # A failed call also cancels the budget, which stops reviews already
+        # waiting to reserve or to retry.
+        stop = threading.Event()
+
+        def review(key: tuple[int, str]) -> CachedReview | None:
+            if stop.is_set():
+                return None
+            run_index, case_id = key
+            try:
+                result = generate(live, arm, inputs[case_id], budget)
+                fresh_review = CachedReview.from_result(case_id, run_index, result)
+                cache.put(inputs[case_id], arm, STAGE, fresh_review)
+            except BaseException:
+                stop.set()
+                budget.cancel()
+                raise
+            return fresh_review
+
+        with ThreadPoolExecutor(max_workers=concurrency) as pool:
+            futures = [pool.submit(review, key) for key in todo]
+            try:
+                wait(futures, return_when=FIRST_EXCEPTION)
+            except BaseException:  # Ctrl-C: stop waiting reviews too
+                budget.cancel()
+                raise
+            finally:
+                # On a failure or Ctrl-C, drop queued reviews; let running
+                # ones finish so what they paid for is cached.
+                stop.set()
+                pool.shutdown(wait=True, cancel_futures=True)
+        # Re-raise the first real failure in schedule order, not finish order;
+        # `Cancelled` only reports that another review failed first.
+        errors = [
+            e for f in futures if not f.cancelled() and (e := f.exception()) is not None
+        ]
+        if errors:
+            raise next((e for e in errors if not isinstance(e, Cancelled)), errors[0])
+        for key, future in zip(todo, futures, strict=True):
+            result = future.result()
+            assert result is not None  # skipped only after a failure
+            done[key] = result
+
+    reviews = [done[key] for key in keys]
+    fresh = len(todo)
 
     out_dir.mkdir(parents=True)
     with (out_dir / "reviews.jsonl").open("w", encoding="utf-8") as f:
@@ -254,6 +315,8 @@ def summarise(
             "p95": percentile(latencies, 95),
         },
         "malformed_reviews": sum(r.malformed for r in reviews),
+        "http_retries": sum(r.http_retries for r in reviews),
+        "retry_wait_s": sum(r.retry_wait_s for r in reviews),
         "fresh_reviews": fresh,
         "spent_this_invocation_usd": spent,
         "budget_usd": limit,

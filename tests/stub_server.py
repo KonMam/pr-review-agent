@@ -8,8 +8,17 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-# Given the request body, return (assistant content, extra usage fields).
+# Given the request body, return (assistant content, extra usage fields), or
+# raise `StubError` to answer with an HTTP error. It may sleep: the server
+# handles requests on separate threads.
 Responder = Callable[[dict[str, Any]], tuple[str, dict[str, Any]]]
+
+
+class StubError(Exception):
+    def __init__(self, status: int, headers: dict[str, str] | None = None) -> None:
+        super().__init__(status)
+        self.status = status
+        self.headers = headers or {}
 
 
 @dataclass
@@ -31,7 +40,18 @@ def stub_server(respond: Responder) -> Iterator[Stub]:
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             stub.requests.append(body)
             stub.auth_headers.append(self.headers.get("Authorization", ""))
-            content, usage_extra = respond(body)
+            try:
+                content, usage_extra = respond(body)
+            except StubError as e:
+                err = json.dumps({"error": {"message": f"stub {e.status}"}}).encode()
+                self.send_response(e.status)
+                for name, value in e.headers.items():
+                    self.send_header(name, value)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(err)))
+                self.end_headers()
+                self.wfile.write(err)
+                return
             payload = {
                 "id": f"stub-{len(stub.requests)}",
                 "object": "chat.completion",

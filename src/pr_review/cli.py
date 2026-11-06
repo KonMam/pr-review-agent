@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 from pr_review.arms import ArmsError, load_arm
-from pr_review.evaluate import run_eval
+from pr_review.evaluate import DEFAULT_CONCURRENCY, run_eval
 from pr_review.llm import DEFAULT_BUDGET_USD, Budget, BudgetExceeded, CostUnknown
 from pr_review.manifest import ManifestError, load_manifest
 
@@ -41,6 +41,13 @@ def main(argv: list[str] | None = None) -> int:
         default=DEFAULT_BUDGET_USD,
         help=f"hard spend limit for this run (default {DEFAULT_BUDGET_USD})",
     )
+    ev.add_argument(
+        "--concurrency",
+        type=int,
+        default=DEFAULT_CONCURRENCY,
+        help="reviews in flight at once; 1 runs them one by one "
+        f"(default {DEFAULT_CONCURRENCY})",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -54,8 +61,11 @@ def main(argv: list[str] | None = None) -> int:
     except (ArmsError, ManifestError, OSError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
-    if args.runs < 1 or args.budget_usd <= 0:
-        print("error: --runs and --budget-usd must be positive", file=sys.stderr)
+    if args.runs < 1 or args.budget_usd <= 0 or args.concurrency < 1:
+        print(
+            "error: --runs, --budget-usd and --concurrency must be positive",
+            file=sys.stderr,
+        )
         return 2
     budget = Budget(args.budget_usd)
     try:
@@ -68,6 +78,7 @@ def main(argv: list[str] | None = None) -> int:
             results_dir=args.results_dir,
             budget=budget,
             run_id=args.run_id,
+            concurrency=args.concurrency,
         )
     except BudgetExceeded as e:
         print(

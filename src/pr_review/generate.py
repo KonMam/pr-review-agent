@@ -74,6 +74,8 @@ class GenerateResult:
     findings: list[Finding]
     malformed: bool  # still malformed after the one retry
     attempts: int
+    retries: int  # 429/5xx retries across attempts
+    retry_wait_s: float  # their failed attempts and backoff, not in latency_s
     prompt_tokens: int
     completion_tokens: int
     cost_usd: float
@@ -144,14 +146,16 @@ def generate(
 ) -> GenerateResult:
     """One review: a call, and one retry if the reply is malformed."""
     messages = build_messages(review)
-    prompt_tokens = completion_tokens = 0
-    cost = latency = 0.0
+    prompt_tokens = completion_tokens = retries = 0
+    cost = latency = retry_wait = 0.0
     for attempt in (1, 2):
         reply = chat(client, arm, messages, budget)
         prompt_tokens += reply.prompt_tokens
         completion_tokens += reply.completion_tokens
         cost += reply.cost_usd
         latency += reply.latency_s
+        retries += reply.retries
+        retry_wait += reply.retry_wait_s
         try:
             findings = parse_reply(reply.content)
         except MalformedReply as e:
@@ -170,6 +174,8 @@ def generate(
         findings=findings,
         malformed=malformed,
         attempts=attempt,
+        retries=retries,
+        retry_wait_s=retry_wait,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         cost_usd=cost,

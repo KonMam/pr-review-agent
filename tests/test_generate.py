@@ -57,7 +57,7 @@ def test_percentile_nearest_rank() -> None:
 
 def test_budget_refuses_once_spent() -> None:
     budget = Budget(0.01)
-    budget.check()
-    budget.charge(0.01)
+    held = budget.reserve(None)
+    budget.settle(held, 0.01)
     with pytest.raises(BudgetExceeded):
-        budget.check()
+        budget.reserve(None)

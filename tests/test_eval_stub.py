@@ -6,12 +6,17 @@ the golden set's layout: base files in `base/` next to the diff, no clone.
 """
 
 import json
+import random
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
+import openai
 import pytest
-from stub_server import stub_server
+from stub_server import StubError, stub_server
 
+from pr_review import llm
 from pr_review.arms import load_arm
 from pr_review.cli import main
 from pr_review.evaluate import run_eval
@@ -63,6 +68,14 @@ model = "other-vendor/other-model"
 reports_cost = true
 json_mode = false
 extra_body = {{ provider = {{ data_collection = "deny" }} }}
+
+# Worst case per call is exactly $0.10: input is free, 1000 output tokens max.
+[arms.tight]
+base_url = "{url}"
+api_key_env = "STUB_KEY_A"
+model = "vendor/tight-model"
+price = {{ input_per_mtok = 0.0, output_per_mtok = 100.0 }}
+max_tokens = 1000
 """
 
 HIT = {
@@ -238,7 +251,8 @@ def test_malformed_reply_gets_one_retry(project: Path) -> None:
 
     with stub_server(lambda body: (next(replies), {})) as stub:
         arms = write_arms(project, stub.base_url)
-        assert main(eval_args(project, arms, "cheap")) == 0
+        # The reply iterator is order-dependent, so run one review at a time.
+        assert main(eval_args(project, arms, "cheap", "--concurrency", "1")) == 0
 
     # Case 1 run 0: bad then good. The other three: bad twice, then give up.
     assert len(stub.requests) == 2 + 2 * 3
@@ -296,3 +310,207 @@ def test_case_filter_runs_only_named_cases(project: Path) -> None:
         assert len(stub.requests) == 2  # one case x 2 runs
         assert main([*args[:-2], "--case", "nope"]) == 2
         assert main([*args[:-2], "--runs", "0"]) == 2
+
+
+class InFlight:
+    """Counts requests the stub is handling at once."""
+
+    def __init__(self) -> None:
+        self.now = self.max = 0
+        self._lock = threading.Lock()
+
+    def __enter__(self) -> None:
+        with self._lock:
+            self.now += 1
+            self.max = max(self.max, self.now)
+
+    def __exit__(self, *exc: object) -> None:
+        with self._lock:
+            self.now -= 1
+
+
+def test_concurrent_calls_overlap_and_order_is_stable(project: Path) -> None:
+    inflight = InFlight()
+    rng = random.Random(7)
+
+    def respond(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        with inflight:
+            time.sleep(0.2 + rng.random() * 0.2)  # scramble finish order
+        return findings_reply(HIT, MISS), {}
+
+    with stub_server(respond) as stub:
+        arms = write_arms(project, stub.base_url)
+        args = eval_args(project, arms, "cheap", "--concurrency", "8")
+        args[args.index("--runs") + 1] = "4"
+        started = time.perf_counter()
+        assert main(args) == 0
+        elapsed = time.perf_counter() - started
+        assert len(stub.requests) == 8
+        # 8 reviews of >= 0.2s each would take >= 1.6s one at a time.
+        assert inflight.max >= 2
+        assert elapsed < 1.6
+
+        # The same run one at a time, from a fresh cache.
+        serial = eval_args(project, arms, "cheap", "--concurrency", "1")
+        serial[serial.index("--runs") + 1] = "4"
+        serial[serial.index("--run-id") + 1] = "serial"
+        serial[serial.index("--cache-dir") + 1] = str(project / "cache-serial")
+        assert main(serial) == 0
+        assert len(stub.requests) == 16
+
+    def reviews(run_id: str) -> list[dict[str, Any]]:
+        path = project / "results" / run_id / "reviews.jsonl"
+        rows = [json.loads(line) for line in path.read_text().splitlines()]
+        for row in rows:
+            assert row.pop("latency_s") > 0
+        return rows
+
+    concurrent = reviews("cheap")
+    assert [(r["run_index"], r["case_id"]) for r in concurrent] == [
+        (run, case) for run in range(4) for case in ("store-001", "store-002")
+    ]
+    assert concurrent == reviews("serial")
+
+    def summary(run_id: str) -> dict[str, Any]:
+        data = json.loads((project / "results" / run_id / "summary.json").read_text())
+        for key in ("run_id", "latency_s"):
+            data.pop(key)
+        return data
+
+    assert summary("cheap") == summary("serial")
+
+
+def run_tight(project: Path, url: str, budget: Budget, concurrency: int) -> None:
+    run_eval(
+        cases=load_manifest(project / "cases" / "manifest.jsonl"),
+        arm=load_arm(write_arms(project, url), "tight"),
+        runs=4,
+        root=project,
+        cache_dir=project / "cache",
+        results_dir=project / "results",
+        budget=budget,
+        concurrency=concurrency,
+    )
+
+
+def test_budget_stays_hard_under_concurrency(project: Path) -> None:
+    # Every reply costs its full worst case ($0.10). Under the old
+    # check-before-call guard, 8 workers would all start and spend $0.80.
+    inflight = InFlight()
+
+    def respond(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        with inflight:
+            time.sleep(0.2)
+        return findings_reply(HIT), {"completion_tokens": 1000}
+
+    with stub_server(respond) as stub:
+        budget = Budget(0.35)
+        with pytest.raises(BudgetExceeded):
+            run_tight(project, stub.base_url, budget, concurrency=8)
+        assert len(stub.requests) == 3
+        assert inflight.max <= 3
+        assert budget.spent_usd == pytest.approx(0.3)
+        assert budget.spent_usd <= budget.limit_usd
+        assert budget.reserved_usd == 0
+
+
+def test_budget_waits_for_settling_calls_instead_of_failing(project: Path) -> None:
+    # Replies cost $0.01 against a $0.10 reservation: only 3 calls fit in
+    # flight under $0.35, but each settles low, so all 8 reviews complete.
+    inflight = InFlight()
+
+    def respond(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        with inflight:
+            time.sleep(0.1)
+        return findings_reply(HIT), {"completion_tokens": 100}
+
+    with stub_server(respond) as stub:
+        budget = Budget(0.35)
+        run_tight(project, stub.base_url, budget, concurrency=8)
+        assert len(stub.requests) == 8
+        assert inflight.max <= 3
+        assert budget.spent_usd == pytest.approx(0.08)
+
+
+def test_429_and_5xx_are_retried_with_backoff(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr(llm, "_sleep", lambda s, cancelled: sleeps.append(s))
+    errors = iter([StubError(429, {"Retry-After": "2"}), StubError(503)])
+    lock = threading.Lock()
+
+    def respond(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        with lock:
+            err = next(errors, None)
+        if err is not None:
+            raise err
+        return findings_reply(HIT), {}
+
+    with stub_server(respond) as stub:
+        arms = write_arms(project, stub.base_url)
+        # One at a time, so both errors hit the same request in turn.
+        assert main(eval_args(project, arms, "cheap", "--concurrency", "1")) == 0
+        assert len(stub.requests) == 4 + 2
+
+    assert sleeps[0] == 2.0  # Retry-After honoured
+    # Second retry of that request: base x 2, plus up to as much jitter.
+    assert llm.BACKOFF_BASE_S * 2 <= sleeps[1] <= llm.BACKOFF_BASE_S * 4
+    summary = json.loads((project / "results" / "cheap" / "summary.json").read_text())
+    assert summary["http_retries"] == 2
+    # Backoff is reported apart from latency, which times the good attempt.
+    reviews = [
+        json.loads(line)
+        for line in (project / "results" / "cheap" / "reviews.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    retried = [r for r in reviews if r["http_retries"]]
+    assert len(retried) == 1 and retried[0]["retry_wait_s"] > 0
+    assert all(r["retry_wait_s"] == 0 for r in reviews if not r["http_retries"])
+    assert summary["cost_per_review_usd"] == pytest.approx(0.002)
+
+
+@pytest.mark.parametrize(("status", "calls"), [(500, 1 + llm.MAX_RETRIES), (400, 1)])
+def test_retries_are_bounded_and_refused_calls_cost_nothing(
+    project: Path, monkeypatch: pytest.MonkeyPatch, status: int, calls: int
+) -> None:
+    monkeypatch.setattr(llm, "_sleep", lambda s, cancelled: None)
+
+    def respond(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        raise StubError(status)
+
+    with stub_server(respond) as stub:
+        budget = Budget(1.0)
+        with pytest.raises(openai.APIStatusError):
+            run_tight(project, stub.base_url, budget, concurrency=1)
+        assert len(stub.requests) == calls
+        assert budget.spent_usd == 0
+        assert budget.reserved_usd == 0
+
+
+def test_a_failure_stops_paid_calls_and_keeps_paid_replies(project: Path) -> None:
+    # Only 3 calls fit in flight under $0.35; 5 more reviews wait to reserve.
+    # The first request is refused (400): the waiting reviews must not send
+    # anything, and the two calls already in flight are cached.
+    lock = threading.Lock()
+    seen = 0
+
+    def respond(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        nonlocal seen
+        with lock:
+            seen += 1
+            first = seen == 1
+        if first:
+            raise StubError(400)
+        time.sleep(0.3)
+        return findings_reply(HIT), {"completion_tokens": 100}
+
+    with stub_server(respond) as stub:
+        budget = Budget(0.35)
+        with pytest.raises(openai.BadRequestError):
+            run_tight(project, stub.base_url, budget, concurrency=8)
+        assert len(stub.requests) == 3
+        assert budget.spent_usd == pytest.approx(0.02)
+        assert budget.reserved_usd == 0
+    assert len(list((project / "cache").rglob("run-*.json"))) == 2
