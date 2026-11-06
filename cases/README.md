@@ -47,7 +47,7 @@ Each case is a fix commit reverted into a synthetic PR that reintroduces the bug
 | context_propagation | 4 |
 | defer_in_loop | 2 |
 
-**Own repos: 3 cases, all from go-taskqueue.** The spec asks for 8. The other
+**Own repos: 3 cases, all from go-taskqueue.** The spec first asked for 8; the owner accepted 3 (see its Decisions). The other
 own repos have few commits that fix a bug in one of the nine classes:
 
 - **dungeon** (private): its "bug fixes" commits change game logic (restart

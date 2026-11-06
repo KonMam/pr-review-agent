@@ -6,8 +6,7 @@
 
 - [ ] **Golden set.** `cases/manifest.jsonl` holds 30-50 cases.
   - Each case has provenance (repo, fix commit SHA, licence), the buggy diff, and ground truth as file + line range.
-  - Every case is Go. At least 8 come from my own Go repos, and the rest from permissively licensed OSS Go repos.
-    **Not met:** item 2 found only 3 usable own-repo fixes (all go-taskqueue); see `cases/README.md`. The set has 41 cases, 38 of them OSS.
+  - Every case is Go. At least 3 come from my own Go repos (see Decisions), and the rest from permissively licensed OSS Go repos. The set has 41 cases: 3 own-repo (all go-taskqueue) and 38 OSS.
   - Each case is tagged with a Go bug class (see Design). No single class makes up more than half the set.
   - A test in `./verify.sh` checks the manifest schema and that every case's diff applies cleanly to its base.
 - [ ] **Scorer.** One scorer, shared by both arms, computes precision, recall and F1 using the matching rule below. It's unit-tested on hand-built fixtures in `./verify.sh`, with no network calls.
@@ -73,12 +72,27 @@ One item per session and PR.
 
 - [x] 1. **Case format and scorer:** the manifest schema, loader, matching rule, and P/R/F1 with unit tests on fixtures. No model calls. Update AGENTS.md, which still says "Claude Agent SDK" and "LiteLLM gateway", to match the Decisions below.
 - [x] 2. **Golden set:** a script that turns a fix commit into a case (revert the fix → buggy diff, fix hunks → ground truth). Curate 30-50 Go cases from my Go repos and from permissively licensed OSS Go repos, tagged by bug class. Add the manifest validation test.
-- [ ] 3. **Agent v0:** the `arms.toml` loader, a single-pass generator, the budget guard, and `eval` with repeated runs, caching, cost and latency. Run it with the cheapest arm to get the first baseline.
+- [x] 3. **Agent v0:** the `arms.toml` loader, a single-pass generator, the budget guard, and `eval` with repeated runs, caching, cost and latency. Run it with the cheapest arm to get the first baseline.
 - [ ] 4. **Multi-stage pipeline:** grade, dedup and suppress, each toggleable, plus the threshold sweep and the ablation table.
 - [ ] 5. **Model ladder:** rerun the best pipeline on 2-3 arms from cheapest to stronger, to see whether a stronger model buys enough precision or recall to justify its cost. Also try read-only tools as an ablation.
 - [ ] 6. **CodeRabbit arm:** a public sandbox GitHub repo with one PR per case. Collect CodeRabbit's comments, normalise them to findings, and score them. **This needs my OK before any remote is created or anything is pushed.**
 - [ ] 7. **`docs/build-vs-buy.md`:** the comparison table, the hand-check results, and the recommendation.
 - [ ] 8. **CI on one Go repo:** a GitHub Action, defined in this repo, that reviews a Go repo's PRs with inline comments. This is the "would I actually use it" check. It runs on one of my Go repos, and wiring it in there **needs my OK first**, since it touches an existing project. One repo only.
+
+## Baseline
+
+First paid run, 2026-11-06, run id `baseline-or-deepseek-flash` (arm `or-deepseek-flash`, model `deepseek/deepseek-v4.1-flash`, stage `generate-1f250a55eceb`, single-pass only). All 41 cases × 3 runs = 123 reviews, all completed within the $1 budget. Requests carried `provider.data_collection = "deny"`. Cost is OpenRouter's reported `usage.cost`.
+
+| | mean | min-max over runs |
+|---|---|---|
+| Precision | 0.991 | 0.972-1.000 |
+| Recall | 0.649 | 0.586-0.690 |
+| F1 | 0.784 | 0.731-0.816 |
+
+- **Cost:** $0.0045 per review, $0.548 total (one review came from the smoke run's cache).
+- **Latency:** p50 11.9 s, p95 50.6 s.
+- **Own-repo slice (3 cases, 6 bugs):** P 1.00, R 0.44 (0.33-0.50), F1 0.61 (0.50-0.67). **OSS (38 cases, 52 bugs):** P 0.99 (0.97-1.00), R 0.67 (0.60-0.73), F1 0.80 (0.74-0.84). These slices were computed from `reviews.jsonl` with the same scorer; `summary.json` doesn't break them out yet.
+- **Errors:** no case errored. 17 of 123 reviews (14%) came back malformed after the retry and count as zero findings. 16 of them used the full 4096-token `max_tokens` on both attempts, which means the reply was cut off. The affected cases are sarama-9f8650a (3/3), sarama-05cb9fa, badger-7ceb365, badger-89689ef and echo-05df10c (2/3 each), and go-taskqueue-aac3b48, go-taskqueue-f8d74eb, kafka-go-ed22f4e, go-redis-9b33d16, echo-02de901 and prometheus-08baa43 (1/3 each). This caps recall, so it should be looked at before item 4's numbers are compared with this baseline.
 
 ## Decisions
 
@@ -103,6 +117,7 @@ One item per session and PR.
   - Rejected: adding Python, which would halve the cases per language for a language I use less.
   - My Go repos have only about 15 commits that look like real fixes, and not all of them will be usable, so OSS Go bug-fix commits fill the rest. Candidate sources: stdlib-adjacent libraries and tools I use.
   - Own-repo cases are also reported as their own slice.
+  - The owner accepted 3 own-repo cases instead of the original 8, because only 3 usable fix commits were found in their Go repos (item 2; see `cases/README.md`).
 - **Ground truth is a human fix commit, not an LLM finding.** Scoring against earlier reviewer-subagent findings would be circular. They count as cases only where a later commit fixed them.
 - **Reverted fixes as synthetic buggy PRs.** This gives exact locations and no labelling work.
   - The cost: one bug per case, and these PRs are cleaner than real ones, which usually mix the bug with unrelated changes.
@@ -114,6 +129,6 @@ One item per session and PR.
 ## Open questions
 
 - **Are my own repos public?** The CodeRabbit sandbox would republish their code. If they're private, own-repo cases run on the agent arm only.
-  - *Answered in item 2 (`gh repo view`, 2026-11-06):* go-taskqueue and duckserve are public; gbemu, dagr and dungeon are private. All 3 own-repo cases are from go-taskqueue, so all of them can go to the CodeRabbit sandbox. The remaining open question is only how to get more own-repo cases.
+  - *Answered in item 2 (`gh repo view`, 2026-11-06):* go-taskqueue and duckserve are public; gbemu, dagr and dungeon are private. All 3 own-repo cases are from go-taskqueue, so all of them can go to the CodeRabbit sandbox. The owner then accepted 3 own-repo cases (see Decisions), so this is closed.
 - **CodeRabbit's free-tier limits** (rate, PR size) on a sandbox with 30-50 PRs. Check them in item 6 before building the case-to-PR script.
 - **OpenRouter privacy settings.** Exclude providers that train on or retain prompts before sending any code. That's fine for public OSS and my own code, but not for anyone else's.
