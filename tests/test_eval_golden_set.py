@@ -1,7 +1,7 @@
 """End to end on the real golden set, offline: `pr-review eval` against a stub.
 
-The stub echoes each case's ground truth as the model's findings, so the run
-must score P = R = 1. That pins the joins between the parts built separately:
+The stub echoes each case's ground truth as the model's findings (none on a
+clean case), so the run must score P = R = 1 with no false positives. That pins the joins between the parts built separately:
 the manifest, each case's `buggy.diff` and `base/` files (read with no clone
 and no network), the prompt, reply parsing and the scorer.
 
@@ -43,7 +43,7 @@ def truth_reply(case: Case) -> str:
                     "file": b.file,
                     "start_line": b.lines.start,
                     "end_line": b.lines.end,
-                    "category": case.bug_class.value,
+                    "category": str(case.bug_class),  # no bugs on a clean case
                     "claim": "echoed ground truth",
                 }
                 for b in case.bugs
@@ -79,6 +79,9 @@ def test_offline_eval_echoing_truth_scores_one(
     assert summary["malformed_reviews"] == 0
     assert summary["precision"]["mean"] == 1.0
     assert summary["recall"]["mean"] == 1.0
+    assert summary["clean_cases"] == sum(not c.bugs for c in CASES) > 0
+    assert summary["fp_per_clean_review"]["mean"] == 0.0
+    assert summary["by_kind"]["bug"]["recall"]["mean"] == 1.0
     # Every base file the diff changes reached the model.
     for body in stub.requests:
         user = body["messages"][-1]["content"]

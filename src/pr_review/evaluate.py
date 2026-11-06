@@ -37,7 +37,7 @@ from pr_review.generate import (
 from pr_review.grade import STAGE as GRADE_STAGE
 from pr_review.grade import GradeResult, grade
 from pr_review.llm import Budget, Cancelled, make_client
-from pr_review.models import Case, Finding
+from pr_review.models import Case, CaseKind, Finding
 from pr_review.scoring import Score, score_case
 from pr_review.stages import (
     DEFAULT_THRESHOLD,
@@ -500,11 +500,51 @@ def score_runs(
 
 
 def _quality(per_run: Sequence[Score]) -> dict[str, Any]:
-    return {
+    """P/R/F1 spreads, plus the false-positive rate when clean cases were scored."""
+    out = {
         "precision": asdict(spread([s.precision for s in per_run])),
         "recall": asdict(spread([s.recall for s in per_run])),
         "f1": asdict(spread([s.f1 for s in per_run])),
     }
+    if any(s.clean_reviews for s in per_run):
+        out["fp_per_clean_review"] = asdict(
+            spread([s.fp_per_clean_review for s in per_run])
+        )
+        out["flagged_clean_share"] = asdict(
+            spread([s.flagged_clean_share for s in per_run])
+        )
+    return out
+
+
+def _by_kind(
+    cases: Sequence[Case],
+    kept: Sequence[tuple[int, str, Sequence[Finding]]],
+    runs: int,
+) -> dict[str, Any]:
+    """Quality on bug cases only and clean cases only; empty unless both kinds are present.
+
+    The combined numbers are the row's own top-level fields. The clean slice
+    has only the false-positive fields: with no bugs, its P/R/F1 are always 0.
+    """
+    kinds = {c.id: c.kind for c in cases}
+    if len(set(kinds.values())) < 2:
+        return {}
+    out = {}
+    for kind in CaseKind:
+        subset = [c for c in cases if c.kind is kind]
+        rows = [k for k in kept if kinds[k[1]] is kind]
+        quality = _quality(score_runs(subset, rows, runs))
+        if kind is CaseKind.CLEAN:
+            quality = {
+                k: v for k, v in quality.items() if k.startswith(("fp_", "flagged_"))
+            }
+        out[str(kind)] = {
+            **quality,
+            "findings_per_review": statistics.fmean(len(k[2]) for k in rows)
+            if rows
+            else 0.0,
+        }
+    return {"by_kind": out}
 
 
 def _row_label(stages: Sequence[Stage]) -> str:
@@ -549,6 +589,7 @@ def ablation_rows(
                 "stages": [str(s) for s in enabled],
                 **_quality(score_runs(cases, kept, runs)),
                 "findings_per_review": statistics.fmean(len(k[2]) for k in kept),
+                **_by_kind(cases, kept, runs),
                 "cost_per_review_usd": statistics.fmean(costs),
                 "latency_s": {
                     "p50": percentile(latencies, 50),
@@ -588,6 +629,7 @@ def threshold_sweep(
                 **_quality(per_run),
                 "f0_5": statistics.fmean(_f_beta(s, 0.5) for s in per_run),
                 "findings_per_review": statistics.fmean(len(k[2]) for k in kept),
+                **_by_kind(cases, kept, runs),
             }
         )
     best = max(rows, key=lambda row: (round(row["f0_5"], 12), row["threshold"]))
@@ -647,11 +689,15 @@ def summarise(
         "stage": STAGE,
         "stages": [str(s) for s in stages],
         "cases": len(cases),
+        "clean_cases": sum(c.kind is CaseKind.CLEAN for c in cases),
         # Compare arms only on identical case sets.
         "case_ids": sorted(c.id for c in cases),
         "runs": runs,
         "reviews": len(reviews),
         **_quality(per_run),
+        **_by_kind(
+            cases, [(r.run_index, r.case_id, r.findings) for r in reviews], runs
+        ),
         "per_run": [
             {**asdict(s), "precision": s.precision, "recall": s.recall, "f1": s.f1}
             for s in per_run

@@ -6,7 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from pr_review.manifest import ManifestError, load_manifest
-from pr_review.models import BugClass, Finding, LineRange
+from pr_review.models import BugClass, CaseKind, Finding, LineRange
 
 
 def case(**overrides: Any) -> dict[str, Any]:
@@ -26,6 +26,27 @@ def case(**overrides: Any) -> dict[str, Any]:
     return data
 
 
+PROV_CHECKED: dict[str, Any] = {
+    "repo": "github.com/konmam/dagr",
+    "fix_commit": "c" * 40,
+    "licence": "MIT",
+    "clean_check": {"later_commits": 20, "checked_at": "d" * 40},
+}
+
+
+def clean(**overrides: Any) -> dict[str, Any]:
+    data: dict[str, Any] = {
+        "id": "dagr-clean-001",
+        "kind": "clean",
+        "provenance": PROV_CHECKED,
+        "base_ref": "b" * 40,
+        "diff_path": "cases/dagr-clean-001/change.diff",
+        "bugs": [],
+    }
+    data.update(overrides)
+    return data
+
+
 def write(tmp_path: Path, *lines: str) -> Path:
     path = tmp_path / "manifest.jsonl"
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -38,6 +59,16 @@ def test_loads_valid_manifest(tmp_path: Path) -> None:
     assert [c.id for c in cases] == ["dagr-001", "dagr-002"]
     assert cases[0].bug_class is BugClass.IGNORED_ERR
     assert cases[0].bugs[0].lines == LineRange(start=41, end=43)
+
+
+def test_loads_clean_case_and_defaults_kind_to_bug(tmp_path: Path) -> None:
+    path = write(tmp_path, json.dumps(case()), json.dumps(clean()))
+    bug, ok = load_manifest(path)
+    assert bug.kind is CaseKind.BUG
+    assert ok.kind is CaseKind.CLEAN
+    assert ok.bugs == [] and ok.bug_class is None
+    assert ok.provenance.clean_check is not None
+    assert ok.provenance.clean_check.later_commits == 20
 
 
 @pytest.mark.parametrize(
@@ -59,6 +90,21 @@ def test_loads_valid_manifest(tmp_path: Path) -> None:
         ),
         (case(base_ref=None), "base_ref"),
         (case(extra="x"), "extra"),
+        (case(bug_class=None), "a bug case needs a bug_class"),
+        (case(kind="flaky"), "kind"),
+        (case(provenance=PROV_CHECKED), "a bug case has no clean_check"),
+        (clean(bug_class="nil_deref"), "a clean case has no bug_class"),
+        (clean(bugs=case()["bugs"]), "a clean case must have empty bugs"),
+        (clean(provenance=case()["provenance"]), "needs provenance.clean_check"),
+        (
+            clean(
+                provenance={
+                    **PROV_CHECKED,
+                    "clean_check": {"later_commits": 0, "checked_at": "b" * 40},
+                }
+            ),
+            "later_commits",
+        ),
         ({"id": "x"}, "provenance"),
     ],
 )

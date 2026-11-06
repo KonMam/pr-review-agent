@@ -4,8 +4,10 @@
 #
 #   cases/build.sh            clone missing repos into cache/repos, rebuild all
 #
-# Each line: id, repo dir, fix sha, provenance repo, licence, bug class,
-# truth hunks ("-" = all). See `make_case --list-hunks` for hunk indices.
+# Each line: id, provenance repo, commit sha, licence, bug class, truth hunks
+# ("-" = all). See `make_case --list-hunks` for hunk indices. Class `clean`
+# builds a clean case (`make_case --clean`): the commit as it was, no bugs,
+# checked against its next 20 commits.
 # Own repos are read from ~/projects and never written.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -30,14 +32,19 @@ while read -r id repo sha licence class truth; do
   if [[ ! -d "$dir" ]]; then
     git clone -q --no-checkout --single-branch "https://$repo" "$dir"
   fi
-  args=(--repo-dir "$dir" --fix "$sha" --id "$id" --repo "$repo"
-        --licence "$licence" --bug-class "$class")
-  [[ "$truth" != "-" ]] && args+=(--truth "$truth")
+  args=(--repo-dir "$dir" --fix "$sha" --id "$id" --repo "$repo" --licence "$licence")
+  if [[ "$class" == clean ]]; then
+    args+=(--clean)
+  else
+    args+=(--bug-class "$class")
+    [[ "$truth" != "-" ]] && args+=(--truth "$truth")
+  fi
   uv run -q python -m pr_review.make_case "${args[@]}" >/dev/null
   # Keep the upstream licence text next to the copied files (attribution).
+  # A bug case's fix commit wins; a clean case only fills a missing one.
   lic=$(git -C "$dir" ls-tree --name-only "$sha" | grep -i -m1 -E '^(licen[cs]e|copying)' || true)
-  if [[ -n "$lic" ]]; then
-    out="cases/licences/${repo#github.com/}.txt"
+  out="cases/licences/${repo#github.com/}.txt"
+  if [[ -n "$lic" && ! ( "$class" == clean && -f "$out" ) ]]; then
     mkdir -p "$(dirname "$out")"
     git -C "$dir" show "$sha:$lic" > "$out"
   fi
@@ -94,4 +101,26 @@ echo-f7dc94d           github.com/labstack/echo             f7dc94d   MIT       
 prometheus-b09d588     github.com/prometheus/client_golang  b09d588   Apache-2.0          ignored_err          -
 kafka-go-51b35f2       github.com/segmentio/kafka-go        51b35f2   MIT                 ignored_err          -
 bbolt-53a930f          github.com/etcd-io/bbolt             53a930f   MIT                 ignored_err          -
+# --- clean: ordinary features and refactors, no known bug (own repos: none
+# --- has 20 later commits that leave a candidate's lines alone) ---
+echo-clean-09ccfba     github.com/labstack/echo             09ccfba   MIT                 clean                -
+gin-clean-53410d2      github.com/gin-gonic/gin             53410d2   MIT                 clean                -
+gin-clean-96ece6a      github.com/gin-gonic/gin             96ece6a   MIT                 clean                -
+chi-clean-1576723      github.com/go-chi/chi                1576723   MIT                 clean                -
+go-redis-clean-2bae9fe github.com/redis/go-redis            2bae9fe   BSD-2-Clause        clean                -
+go-redis-clean-e6ea2d2 github.com/redis/go-redis            e6ea2d2   BSD-2-Clause        clean                -
+sarama-clean-d39f8ea   github.com/IBM/sarama                d39f8ea   MIT                 clean                -
+sarama-clean-e76f927   github.com/IBM/sarama                e76f927   MIT                 clean                -
+nats-clean-b5bc7b4     github.com/nats-io/nats.go           b5bc7b4   Apache-2.0          clean                -
+prometheus-clean-b3886a6 github.com/prometheus/client_golang b3886a6  Apache-2.0          clean                -
+prometheus-clean-572ca3a github.com/prometheus/client_golang 572ca3a  Apache-2.0          clean                -
+kafka-go-clean-ceb95ed github.com/segmentio/kafka-go        ceb95ed   MIT                 clean                -
+cli-clean-c344b46      github.com/urfave/cli                c344b46   MIT                 clean                -
+fasthttp-clean-7aea379 github.com/valyala/fasthttp          7aea379   MIT                 clean                -
+badger-clean-10a09e6   github.com/dgraph-io/badger          10a09e6   Apache-2.0          clean                -
+badger-clean-a3882a0   github.com/dgraph-io/badger          a3882a0   Apache-2.0          clean                -
+bbolt-clean-287049e    github.com/etcd-io/bbolt             287049e   MIT                 clean                -
+bbolt-clean-2d788aa    github.com/etcd-io/bbolt             2d788aa   MIT                 clean                -
+pgx-clean-0aebf611     github.com/jackc/pgx                 0aebf611  MIT                 clean                -
+pgx-clean-ac1ef1d1     github.com/jackc/pgx                 ac1ef1d1  MIT                 clean                -
 EOF

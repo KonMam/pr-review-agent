@@ -221,3 +221,123 @@ def test_truth_uses_buggy_file_numbers_when_fix_inserts_above(tmp_path: Path) ->
                    cwd=tree, check=True)  # fmt: skip
     applied = (tree / "a.go").read_text().splitlines()
     assert applied[buggy_line - 1] == "\treturn int64(a + b)"
+
+
+def clean_repo(tmp_path: Path, later_edit: str | None) -> tuple[Path, str]:
+    """A repo where commit C adds `func h` to a.go, followed by 3 later commits.
+
+    The later commits edit the far end of the file, except that `later_edit`
+    ("change" or "insert") makes the second one touch C's lines.
+    """
+    r = tmp_path / "src"
+    r.mkdir()
+    git(r, "init", "-q")
+    git(r, "config", "user.email", "t@t")
+    git(r, "config", "user.name", "t")
+    lines = ["package a", "", *[f"var v{i} = {i}" for i in range(1, 31)]]
+    (r / "a.go").write_text("\n".join(lines) + "\n")
+    git(r, "add", ".")
+    git(r, "commit", "-qm", "base")
+    h = ["func h() int {", "\treturn 1", "}"]
+    lines[10:10] = h  # lines 11-13
+    (r / "a.go").write_text("\n".join(lines) + "\n")
+    (r / "a_test.go").write_text("package a\n")
+    git(r, "add", ".")
+    git(r, "commit", "-qm", "add h")
+    c = git(r, "rev-parse", "HEAD")
+    for n in range(3):
+        if n == 1 and later_edit == "change":
+            lines[11] = "\treturn 2"
+        elif n == 1 and later_edit == "insert":
+            lines[11:11] = ["\tprintln()"]
+        else:
+            lines[-1] = f"var v30 = {100 + n}"
+        (r / "a.go").write_text("\n".join(lines) + "\n")
+        git(r, "commit", "-qam", f"later {n}")
+    return r, c
+
+
+def clean_argv(repo: Path, commit: str, cases: Path) -> list[str]:
+    return ["--clean", "--repo-dir", str(repo), "--fix", commit, "--id", "c-1",
+            "--repo", "example.com/c", "--licence", "MIT", "--later", "3",
+            "--cases-dir", str(cases)]  # fmt: skip
+
+
+def test_main_writes_clean_case_from_the_commit(tmp_path: Path) -> None:
+    repo, commit = clean_repo(tmp_path, None)
+    cases = tmp_path / "cases"
+    assert main(clean_argv(repo, commit, cases)) == 0
+
+    case = json.loads((cases / "manifest.jsonl").read_text())
+    assert case["kind"] == "clean"
+    assert case["bugs"] == [] and case["bug_class"] is None
+    assert case["base_ref"] == git(repo, "rev-parse", f"{commit}^")
+    assert case["provenance"]["fix_commit"] == commit
+    assert case["provenance"]["clean_check"] == {
+        "later_commits": 3,
+        "checked_at": git(repo, "rev-parse", "HEAD"),
+    }
+    assert case["diff_path"] == f"{cases.as_posix()}/c-1/change.diff"
+
+    # The diff is the commit forward (adds h), without the test file, and it
+    # applies to base/ (the parent).
+    diff = (cases / "c-1" / "change.diff").read_text()
+    assert "+func h() int {" in diff and "a_test.go" not in diff
+    tree = tmp_path / "tree"
+    shutil.copytree(cases / "c-1" / "base", tree)
+    git(tree, "init", "-q")
+    subprocess.run(["git", "apply", str(cases / "c-1" / "change.diff")],
+                   cwd=tree, check=True)  # fmt: skip
+    assert "func h() int {" in (tree / "a.go").read_text()
+
+
+@pytest.mark.parametrize(
+    ("edit", "why"),
+    [
+        ("change", "1 of 3 added lines changed later"),
+        ("insert", "edited within 3 lines"),
+    ],
+)
+def test_clean_rejects_commit_whose_lines_a_later_commit_touched(
+    tmp_path: Path, edit: str, why: str
+) -> None:
+    repo, commit = clean_repo(tmp_path, edit)
+    with pytest.raises(SystemExit, match=why):
+        main(clean_argv(repo, commit, tmp_path / "cases"))
+    assert not (tmp_path / "cases" / "manifest.jsonl").exists()
+
+
+def test_clean_rejects_an_insertion_that_arrived_through_a_merge(
+    tmp_path: Path,
+) -> None:
+    # The insertion is written on a branch, so blame credits the branch
+    # commit, which is not on the first-parent line the window counts from.
+    repo, commit = clean_repo(tmp_path, None)
+    main_branch = git(repo, "rev-parse", "--abbrev-ref", "HEAD")
+    git(repo, "checkout", "-qb", "side", commit)
+    lines = (repo / "a.go").read_text().splitlines()
+    lines[11:11] = ["\tprintln()"]
+    (repo / "a.go").write_text("\n".join(lines) + "\n")
+    git(repo, "commit", "-qam", "side edit")
+    git(repo, "checkout", "-q", main_branch)
+    git(repo, "merge", "-q", "--no-ff", "-m", "merge side", "side")
+    argv = clean_argv(repo, commit, tmp_path / "cases")
+    argv[argv.index("--later") + 1] = "4"  # 3 later commits, then the merge
+    with pytest.raises(SystemExit, match="edited within 3 lines"):
+        main(argv)
+
+
+def test_clean_needs_enough_later_commits(tmp_path: Path) -> None:
+    repo, commit = clean_repo(tmp_path, None)
+    argv = clean_argv(repo, commit, tmp_path / "cases")
+    argv[argv.index("--later") + 1] = "4"
+    with pytest.raises(SystemExit, match="only 3 commits after"):
+        main(argv)
+
+
+def test_clean_takes_no_bug_class(tmp_path: Path) -> None:
+    repo, commit = clean_repo(tmp_path, None)
+    with pytest.raises(SystemExit):
+        main(
+            [*clean_argv(repo, commit, tmp_path / "cases"), "--bug-class", "nil_deref"]
+        )

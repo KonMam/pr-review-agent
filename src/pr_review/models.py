@@ -43,12 +43,36 @@ class BugClass(StrEnum):
     UNCLOSED_RESOURCE = "unclosed_resource"
 
 
+class CaseKind(StrEnum):
+    """A bug case reverts a fix; a clean case is an ordinary commit with no known bug."""
+
+    BUG = "bug"
+    CLEAN = "clean"
+
+
+class CleanCheck(_Strict):
+    """How a clean case was checked: no later commit touched what it changed.
+
+    `checked_at` is the `later_commits`-th commit after the case's commit. At
+    that commit every line the case added is still there, and no line within
+    the scorer's tolerance of one came from a commit in between.
+    """
+
+    later_commits: int = Field(ge=1)
+    checked_at: str = Field(pattern=r"^[0-9a-f]{40}$")
+
+
 class Provenance(_Strict):
-    """Where a case came from."""
+    """Where a case came from.
+
+    `fix_commit` is the commit the case is built from: the fix for a bug case,
+    the change itself for a clean case.
+    """
 
     repo: str = Field(min_length=1)
     fix_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
     licence: str = Field(min_length=1)
+    clean_check: CleanCheck | None = None
 
 
 class Bug(_Strict):
@@ -59,14 +83,37 @@ class Bug(_Strict):
 
 
 class Case(_Strict):
-    """One golden-set case: a buggy diff, the commit it applies to, and where the bug is."""
+    """One golden-set case: a diff, the commit it applies to, and where the bugs are.
+
+    A bug case has a bug class and at least one bug. A clean case has neither,
+    so every finding on it is a false positive, and it records its clean check.
+    """
 
     id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]*$")
+    kind: CaseKind = CaseKind.BUG
     provenance: Provenance
     base_ref: str = Field(min_length=1)
     diff_path: str = Field(min_length=1)
-    bug_class: BugClass
-    bugs: list[Bug] = Field(min_length=1)
+    bug_class: BugClass | None = None
+    bugs: list[Bug]
+
+    @model_validator(mode="after")
+    def _kind_fits(self) -> Self:
+        if self.kind is CaseKind.BUG:
+            if self.bug_class is None:
+                raise ValueError("a bug case needs a bug_class")
+            if not self.bugs:
+                raise ValueError("bugs is empty; a bug case needs at least one")
+            if self.provenance.clean_check is not None:
+                raise ValueError("a bug case has no clean_check")
+        else:
+            if self.bug_class is not None:
+                raise ValueError("a clean case has no bug_class")
+            if self.bugs:
+                raise ValueError("a clean case must have empty bugs")
+            if self.provenance.clean_check is None:
+                raise ValueError("a clean case needs provenance.clean_check")
+        return self
 
 
 class Finding(_Strict):

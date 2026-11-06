@@ -22,6 +22,13 @@ No findings gives precision 0.0, so an arm can't score well by staying silent;
 no bugs gives recall 0.0. F1 is 0.0 when precision + recall is 0. The raw
 counts are kept on `Score`, so callers can tell "undefined" from "measured 0".
 
+Clean cases (no bugs): every finding is a false positive, so it counts in
+precision's denominator, and the case adds nothing to recall. A clean case also
+counts toward the false-positive rate: `fp_per_clean_review` (findings per
+clean review) and `flagged_clean_share` (share of clean reviews with any
+finding). Both are 0.0 when no clean case was scored. A case with no bugs is
+clean; the manifest guarantees a bug case has at least one.
+
 Aggregate over cases by adding per-case `Score`s (micro-average): match within
 each case, then sum the counts. Matching across cases would let a finding in
 one case hit a bug in another.
@@ -52,6 +59,9 @@ class Score:
     matched_findings: int = 0
     bugs: int = 0
     matched_bugs: int = 0
+    clean_reviews: int = 0
+    clean_findings: int = 0
+    flagged_clean_reviews: int = 0  # clean reviews with at least one finding
 
     def __add__(self, other: "Score") -> "Score":
         return Score(
@@ -59,6 +69,10 @@ class Score:
             matched_findings=self.matched_findings + other.matched_findings,
             bugs=self.bugs + other.bugs,
             matched_bugs=self.matched_bugs + other.matched_bugs,
+            clean_reviews=self.clean_reviews + other.clean_reviews,
+            clean_findings=self.clean_findings + other.clean_findings,
+            flagged_clean_reviews=self.flagged_clean_reviews
+            + other.flagged_clean_reviews,
         )
 
     @property
@@ -74,16 +88,28 @@ class Score:
         p, r = self.precision, self.recall
         return 0.0 if p + r == 0 else 2 * p * r / (p + r)
 
+    @property
+    def fp_per_clean_review(self) -> float:
+        return _ratio(self.clean_findings, self.clean_reviews)
+
+    @property
+    def flagged_clean_share(self) -> float:
+        return _ratio(self.flagged_clean_reviews, self.clean_reviews)
+
 
 def score_case(findings: Sequence[Finding], bugs: Sequence[Bug]) -> Score:
-    """Score one case's findings against its ground-truth bugs."""
+    """Score one case's findings against its ground-truth bugs (none: a clean case)."""
     matched_findings = sum(1 for f in findings if any(matches(f, b) for b in bugs))
     matched_bugs = sum(1 for b in bugs if any(matches(f, b) for f in findings))
+    clean = not bugs
     return Score(
         findings=len(findings),
         matched_findings=matched_findings,
         bugs=len(bugs),
         matched_bugs=matched_bugs,
+        clean_reviews=int(clean),
+        clean_findings=len(findings) if clean else 0,
+        flagged_clean_reviews=int(clean and bool(findings)),
     )
 
 

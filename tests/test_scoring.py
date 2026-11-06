@@ -75,15 +75,53 @@ def test_no_findings() -> None:
     assert (s.precision, s.recall, s.f1) == (0.0, 0.0, 0.0)
 
 
-def test_no_bugs() -> None:
-    s = score_case([finding("pkg/a.go", 10)], [])
-    assert s == Score(findings=1, matched_findings=0, bugs=0, matched_bugs=0)
+def test_no_bugs_is_a_clean_case_and_every_finding_is_a_false_positive() -> None:
+    s = score_case([finding("pkg/a.go", 10), finding("pkg/b.go", 3)], [])
+    assert s == Score(
+        findings=2,
+        matched_findings=0,
+        bugs=0,
+        matched_bugs=0,
+        clean_reviews=1,
+        clean_findings=2,
+        flagged_clean_reviews=1,
+    )
     assert (s.precision, s.recall, s.f1) == (0.0, 0.0, 0.0)
+    assert (s.fp_per_clean_review, s.flagged_clean_share) == (2.0, 1.0)
 
 
 def test_nothing_at_all() -> None:
+    # A silent review of a clean case: a clean review with no false positive.
     s = score_case([], [])
     assert (s.precision, s.recall, s.f1) == (0.0, 0.0, 0.0)
+    assert s == Score(clean_reviews=1)
+    assert (s.fp_per_clean_review, s.flagged_clean_share) == (0.0, 0.0)
+
+
+def test_bug_case_counts_nothing_toward_the_false_positive_rate() -> None:
+    s = score_case([finding("pkg/a.go", 40)], [BUG])
+    assert (s.clean_reviews, s.clean_findings, s.flagged_clean_reviews) == (0, 0, 0)
+    assert (s.fp_per_clean_review, s.flagged_clean_share) == (0.0, 0.0)
+
+
+def test_clean_cases_lower_precision_and_leave_recall_alone() -> None:
+    hit = score_case([finding("pkg/a.go", 10)], [BUG])
+    noisy = score_case([finding("pkg/c.go", 1), finding("pkg/c.go", 9)], [])
+    quiet = score_case([], [])
+    total = hit + noisy + quiet
+    assert total == Score(
+        findings=3,
+        matched_findings=1,
+        bugs=1,
+        matched_bugs=1,
+        clean_reviews=2,
+        clean_findings=2,
+        flagged_clean_reviews=1,
+    )
+    assert total.precision == pytest.approx(1 / 3)
+    assert total.recall == 1.0
+    assert total.fp_per_clean_review == 1.0
+    assert total.flagged_clean_share == 0.5
 
 
 def test_micro_average_across_cases() -> None:

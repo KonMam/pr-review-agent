@@ -9,6 +9,7 @@
   - Every case is Go. At least 3 come from my own Go repos (see Decisions), and the rest from permissively licensed OSS Go repos. The set has 41 cases: 3 own-repo (all go-taskqueue) and 38 OSS.
   - Each case is tagged with a Go bug class (see Design). No single class makes up more than half the set.
   - A test in `./verify.sh` checks the manifest schema and that every case's diff applies cleanly to its base.
+  - **Clean cases.** The manifest also holds 15-20 bug-free cases (`kind: clean`, `bugs: []`, no bug class): ordinary non-fix commits (features, refactors, small API changes) with 10-80 diff lines, from the same OSS repos and my own where usable. The diff is the commit itself and the base is its parent. Each one is checked to have no later commit touching its changed lines within the next 20 commits, and the check is recorded in its provenance. The 30-50 count and the bug-class balance apply to bug cases only.
 - [ ] **Scorer.** One scorer, shared by both arms, computes precision, recall and F1 using the matching rule below. It's unit-tested on hand-built fixtures in `./verify.sh`, with no network calls.
 - [ ] **Model swap is config only.** Each model arm is a named entry in `arms.toml`: base URL, key env var, model id, and price, if the provider doesn't report cost. Adding or swapping a model, or moving a stage to another provider, changes `arms.toml` and no Python. A test runs the pipeline against a stub OpenAI-compatible server under two different arm configs to prove this.
 - [ ] **Agent eval.**
@@ -59,6 +60,7 @@ These same classes are the tags on golden-set cases.
 **Matching rule.** A finding matches a ground-truth bug when it names the same file and its line range overlaps the bug's range widened by ±3 lines.
 - Precision = findings matching some bug / all findings after dedup.
 - Recall = bugs matched by at least one finding / all bugs.
+- **Clean cases** have no bugs, so every finding on one is a false positive: it counts in precision's denominator and adds nothing to recall. The summary also reports a false-positive rate on clean cases: findings per clean review, and the share of clean reviews with any finding. Numbers are reported for bug cases only, clean cases only and the combined set.
 - Location-only matching overcounts a little: a finding on the right lines can still give the wrong reason. To bound this, I hand-check 20 sampled true positives per arm and report the share that were wrong.
 
 **Runs and cost.**
@@ -74,6 +76,7 @@ One item per session and PR.
 - [x] 2. **Golden set:** a script that turns a fix commit into a case (revert the fix → buggy diff, fix hunks → ground truth). Curate 30-50 Go cases from my Go repos and from permissively licensed OSS Go repos, tagged by bug class. Add the manifest validation test.
 - [x] 3. **Agent v0:** the `arms.toml` loader, a single-pass generator, the budget guard, and `eval` with repeated runs, caching, cost and latency. Run it with the cheapest arm to get the first baseline.
 - [x] 4. **Multi-stage pipeline:** grade, dedup and suppress, each toggleable, plus the threshold sweep and the ablation table. Results are in the Pipeline section below.
+- [x] 4a. **Clean cases:** 20 bug-free commits added to the golden set so false positives are measurable, the scorer's false-positive rate, and item 4's ablation and sweep rerun on the combined set. Results are in the Clean cases section below.
 - [ ] 5. **Model ladder:** rerun the best pipeline on 2-3 arms from cheapest to stronger, to see whether a stronger model buys enough precision or recall to justify its cost. Also try read-only tools as an ablation.
 - [ ] 6. **CodeRabbit arm:** a public sandbox GitHub repo with one PR per case. Collect CodeRabbit's comments, normalise them to findings, and score them. **This needs my OK before any remote is created or anything is pushed.**
 - [ ] 7. **`docs/build-vs-buy.md`:** the comparison table, the hand-check results, and the recommendation.
@@ -144,6 +147,47 @@ The default threshold is **0.3**, the highest recall at the sweep's best precisi
 - One generate call in `p4-single-pass` cost $0.01116 against a $0.01092 reservation: OpenRouter routed it above twice the list price. The overshoot was small and the run stayed far under its cap, but `REPORTED_COST_MARGIN = 2.0` isn't a strict bound for this arm.
 - The grader uses the same reasoning arm: 127 calls for 113 graded reviews, with 14 cut-offs recovered by the same fallback and 0 malformed.
 
+## Clean cases (item 4a)
+
+Run 2026-11-06 on arm `or-deepseek-flash`, 61 cases (41 bug + 20 clean) × 3 runs, `--stages grade,dedup,suppress`, `--concurrency 8`. Run ids are `clean-pipeline` (paid) and `clean-pipeline-final` (the same replies re-scored from cache, $0). The stages, prompt and arm hash are the same as item 4 (`generate-43defae9ada5`, `grade-39d6a9243a11`, `607b939d893a4b93`), so the 123 bug-case reviews came from item 4's cache. The spend was **$0.283** for 60 generate and 4 grade calls on the new cases. There were 0 malformed reviews.
+
+**Ablation.** Combined P/R/F1 are means with min-max over 3 runs. Recall comes from bug cases only. "FP/clean review" is findings per clean review, and "flagged" is the share of clean reviews with any finding.
+
+| Row | Combined P | Recall | Combined F1 | Bug-only P | FP/clean review | Clean flagged | Findings/review (all) | Cost/review | p50 / p95 |
+|---|---|---|---|---|---|---|---|---|---|
+| single-pass | 0.958 (0.915-1.000) | 0.787 (0.759-0.828) | 0.864 (0.829-0.906) | 0.993 | 0.083 (0.000-0.200) | 0.067 (0.000-0.150) | 0.78 | $0.0044 | 16.2 s / 67.2 s |
+| + grade (0.3) | 0.984 (0.976-1.000) | 0.741 (0.707-0.776) | 0.846 (0.820-0.874) | 1.000 | 0.033 (0.000-0.050) | 0.033 (0.000-0.050) | 0.72 | $0.0065 | 29.5 s / 82.9 s |
+| + grade + dedup | same as + grade | | | | | | | | |
+| + grade + dedup + suppress | same as + grade | | | | | | | | |
+
+**Grade threshold sweep** (means, with dedup and suppress also applied; F0.5 is on the combined set):
+
+| Threshold | Combined P | R | F1 | F0.5 | Bug-only P | FP/clean review | Clean flagged |
+|---|---|---|---|---|---|---|---|
+| 0.0 (no drop) | 0.958 | 0.787 | 0.864 | 0.918 | 0.993 | 0.083 | 0.067 |
+| 0.1-0.3 | 0.984 | 0.741 | 0.846 | 0.924 | 1.000 | 0.033 | 0.033 |
+| 0.4-0.7 | 0.992 | 0.690-0.695 | 0.814-0.817 | 0.912-0.914 | 1.000 | 0.017 | 0.017 |
+| 0.8 | 0.989 | 0.529 | 0.688 | 0.841 | 1.000 | 0.017 | 0.017 |
+| 0.9 | 0.987 | 0.471 | 0.637 | 0.809 | 1.000 | 0.017 | 0.017 |
+| 1.0 | 0.986 | 0.437 | 0.604 | 0.786 | 1.000 | 0.017 | 0.017 |
+
+The best F0.5 is at 0.3 (0.1-0.3 tie, and the highest wins), so the default stays at 0.3.
+
+**Reading it:**
+- **The reviewer is quiet on clean code.** Single-pass gave 5 findings in 60 clean reviews: 4 reviews flagged, all in 3 of the 20 cases.
+  - echo-clean-09ccfba: a possible nil `c.request`, graded 0.0.
+  - go-redis-clean-e6ea2d2: an error that isn't set on the returned command, graded 0.0.
+  - cli-clean-c344b46: three findings over two runs on the `Exit` rewrite, graded 0.0, 0.3 and 1.0. The 1.0 one says `Exit(nil, 1)` with a typed-nil error dereferences nil. It might be a real latent bug that the clean check can't see, so item 7 should hand-check it.
+  - Bug-only precision barely moves (0.993 and 1.000), so the combined precision drop, 0.993 to 0.958, comes entirely from these clean-case findings.
+- **Does grading pay for itself now? Only on the precision-first measure, and only just.**
+  - It removes 3 of the 5 clean false positives, plus the one location-level false positive on a bug case. FP per clean review falls from 0.083 to 0.033.
+  - It still costs 0.046 recall (the same 7% of matched bugs as in item 4). F1 falls from 0.864 to 0.846, while F0.5 rises from 0.918 to 0.924.
+  - It adds $0.0021 per review and about doubles p50. On clean cases it costs almost nothing, since grade only runs on reviews with candidates (4 of 60).
+  - The gain rests on 4 false positives in total. It is within run-to-run noise: single-pass flagged 0 to 3 clean reviews per run.
+  - So item 4's recommendation stands, with less margin. Item 5 should run single-pass + dedup + suppress as the default, with grade as an ablation. Item 7's hand-check, of the dropped matches and the cli-clean finding, decides between them.
+- **20 clean cases are too few to rank stages on false positives.** Each run has 20 clean reviews, so one false positive moves the flagged share by 0.05. If item 5 or 6 needs a sharper false-positive number, the clean set should grow (the builder makes this cheap) before anything else is tuned on it.
+- **Truncation is higher on clean code.** 60 clean reviews had 23 generate attempts cut off at `max_tokens`, against 26 in 123 bug reviews (369 attempts). The model seems to keep reasoning when it finds nothing. Every one was recovered by the reasoning-off retry, so the reviews are complete, but the clean cases' p95 latency and cost carry that retry. Clean reviews averaged $0.0046 for generate.
+
 ## Decisions
 
 - **Model access: OpenRouter, behind config-defined arms. The Anthropic API is rejected for now.**
@@ -172,6 +216,7 @@ The default threshold is **0.3**, the highest recall at the sweep's best precisi
 - **Reverted fixes as synthetic buggy PRs.** This gives exact locations and no labelling work.
   - The cost: one bug per case, and these PRs are cleaner than real ones, which usually mix the bug with unrelated changes.
   - To offset this, where a fix commit carries other edits, those edits are kept in the diff as noise.
+- **Clean cases make false positives measurable.** With one bug per small diff and about one finding per review, nearly every finding lands within ±3 lines of the bug, so precision on bug-only cases sat at 0.99 and a precision stage (grade) could only lose recall (item 4). Bug-free commits give the reviewer real chances to be wrong. They are taken from history, not written, and a commit counts as clean only if no later commit within 20 changes or inserts lines within ±3 of the lines it added: a conservative proxy for "not followed by a fix", since any later edit there rejects it. A latent bug the check can't see would make a correct finding count as a false positive, so clean-case precision is a lower bound.
 - **Comparison arm: CodeRabbit.** It's the market leader, free on public repos, and makes the vendor benchmark claims (Martian bench) that this setup can test.
   - Rejected: Copilot review (needs a seat), Greptile (paid trial), Claude Code GH Action (same model family as the agent, so it says little about build vs buy).
 - **Precision first.** Public benchmarks put the best tools around 50% precision and 50% recall, and raising recall adds noise fast. The threshold is chosen for precision, and recall is reported, not optimised.

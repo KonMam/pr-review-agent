@@ -1,0 +1,43 @@
+diff --git a/consumer.go b/consumer.go
+index f9d50c96..92178e24 100644
+--- a/consumer.go
++++ b/consumer.go
+@@ -455,6 +455,9 @@ type partitionConsumer struct {
+ 
+ var errTimedOut = errors.New("timed out feeding messages to the user") // not user-facing
+ 
++// log every Nth consecutive failure (~20s apart at the default backoff)
++const stuckRetryThreshold = 10
++
+ func (child *partitionConsumer) sendError(err error) {
+ 	cErr := &ConsumerError{
+ 		Topic:     child.topic,
+@@ -518,8 +521,12 @@ func (child *partitionConsumer) stopDispatcher() {
+ }
+ 
+ func (child *partitionConsumer) computeBackoff() time.Duration {
++	retries := child.retries.Add(1)
++	if retries >= stuckRetryThreshold && retries%stuckRetryThreshold == 0 {
++		Logger.Printf("consumer/%s/%d still retrying after %d consecutive failures\n",
++			child.topic, child.partition, retries)
++	}
+ 	if child.conf.Consumer.Retry.BackoffFunc != nil {
+-		retries := child.retries.Add(1)
+ 		return child.conf.Consumer.Retry.BackoffFunc(int(retries))
+ 	}
+ 	return child.conf.Consumer.Retry.Backoff
+diff --git a/consumer_group.go b/consumer_group.go
+index 07348b40..bb9f2d0f 100644
+--- a/consumer_group.go
++++ b/consumer_group.go
+@@ -1166,7 +1166,9 @@ type ConsumerGroupHandler interface {
+ 
+ 	// ConsumeClaim must start a consumer loop of ConsumerGroupClaim's Messages().
+ 	// Once the Messages() channel is closed, the Handler must finish its processing
+-	// loop and exit.
++	// loop and exit. Handlers should also return when ConsumerGroupSession.Context()
++	// is done; Messages() alone can block while the partition consumer is retrying
++	// (e.g. after a broker disconnect). See examples/consumergroup.
+ 	ConsumeClaim(ConsumerGroupSession, ConsumerGroupClaim) error
+ }
+ 

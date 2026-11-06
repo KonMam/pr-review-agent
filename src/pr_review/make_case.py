@@ -25,6 +25,15 @@ The source repo is only read (`git diff`, `git show`), never written.
     uv run python -m pr_review.make_case --repo-dir DIR --fix SHA --list-hunks
     uv run python -m pr_review.make_case --repo-dir DIR --fix SHA --id ID \\
         --repo github.com/o/r --licence MIT --bug-class nil_deref --truth 0,2
+
+With `--clean`, `--fix` names an ordinary commit with no known bug, and the
+case is that commit as it was: base is its parent, the diff is the commit's
+non-test Go change, and `bugs` is empty, so every finding on it is a false
+positive. Nothing is stripped; there is no label to leak. It is only written
+if no later commit touched what it changed (see `clean_check`).
+
+    uv run python -m pr_review.make_case --clean --repo-dir DIR --fix SHA \\
+        --id ID --repo github.com/o/r --licence MIT [--later 20]
 """
 
 import argparse
@@ -38,7 +47,15 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from pr_review.manifest import load_manifest
-from pr_review.models import Bug, BugClass, Case, LineRange, Provenance
+from pr_review.models import (
+    Bug,
+    BugClass,
+    Case,
+    CaseKind,
+    CleanCheck,
+    LineRange,
+    Provenance,
+)
 from pr_review.scoring import TOLERANCE
 
 _HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
@@ -306,6 +323,118 @@ def write_case(args: argparse.Namespace) -> Case:
     return case
 
 
+CLEAN_LATER_COMMITS = 20
+
+
+class NotClean(Exception):
+    """A later commit touched what the candidate clean commit changed."""
+
+
+def later_commits(repo: Path, commit: str, n: int) -> list[str]:
+    """The first `n` commits after `commit` on the first-parent line to the clone's HEAD."""
+    out = git(repo, "rev-list", "--reverse", "--first-parent", "--ancestry-path",
+              f"{commit}..HEAD")  # fmt: skip
+    later = out.split()
+    if len(later) < n:
+        raise NotClean(f"only {len(later)} commits after {commit[:9]}, need {n}")
+    return later[:n]
+
+
+def blame_lines(repo: Path, rev: str, path: str) -> list[str]:
+    """The commit each line of `path` at `rev` comes from, in file order."""
+    r = subprocess.run(
+        ["git", "-C", str(repo), "blame", "--porcelain", rev, "--", path],
+        check=False,  # a missing file is an answer, not an error
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0:
+        raise NotClean(f"{path} is gone at {rev[:9]}")
+    owners: list[str] = []
+    for line in r.stdout.splitlines():
+        if line.startswith("\t"):
+            continue
+        parts = line.split()
+        # header: <40-hex sha> <orig line> <final line> [<group size>]
+        if len(parts) in (3, 4) and re.fullmatch(r"[0-9a-f]{40}", parts[0]):
+            owners.append(parts[0])
+    return owners
+
+
+def check_clean(
+    repo: Path, commit: str, files: list[str], n: int = CLEAN_LATER_COMMITS
+) -> CleanCheck:
+    """Check no commit in the next `n` touched the lines `commit` added.
+
+    Blame at the n-th later commit: every line `commit` added must still come
+    from `commit`, and no line within the scorer's tolerance of one may come
+    from a commit in between (an insertion, such as a nil check added next to
+    them). Any later edit there counts, fix or not, so the check is strict.
+    Raises `NotClean` otherwise.
+    """
+    later = later_commits(repo, commit, n)
+    # Every commit in between, merged branches included: blame credits a
+    # merged line to the branch commit that wrote it, not to the merge.
+    window = set(git(repo, "rev-list", f"{commit}..{later[-1]}").split())
+    for f in files:
+        added = len(added_lines(repo, commit, f))
+        if added == 0:
+            continue  # the commit only deleted lines here
+        owners = blame_lines(repo, later[-1], f)
+        mine = [i for i, o in enumerate(owners) if o == commit]
+        if len(mine) != added:
+            raise NotClean(
+                f"{f}: {added - len(mine)} of {added} added lines changed later"
+            )
+        for i in mine:
+            near = owners[max(0, i - TOLERANCE) : i + TOLERANCE + 1]
+            if hits := sorted(window.intersection(near)):
+                raise NotClean(f"{f}: {hits[0][:9]} edited within {TOLERANCE} lines")
+    return CleanCheck(later_commits=n, checked_at=later[-1])
+
+
+def write_clean_case(args: argparse.Namespace) -> Case:
+    repo: Path = args.repo_dir
+    commit = git(repo, "rev-parse", f"{args.fix}^{{commit}}").strip()
+    parents = git(repo, "rev-list", "--parents", "-n1", commit).split()[1:]
+    if len(parents) != 1:
+        raise SystemExit(f"{commit}: need exactly one parent, has {len(parents)}")
+    parent = parents[0]
+    files = changed_files(repo, commit)
+    if not files:
+        raise SystemExit(f"{commit}: no non-test Go files changed")
+    try:
+        check = check_clean(repo, commit, files, args.later)
+    except NotClean as e:
+        raise SystemExit(f"{commit[:9]} is not clean: {e}") from e
+    diff = git(repo, "diff", "--no-renames", "-U3", parent, commit, "--", *files)
+
+    case = Case(
+        id=args.id,
+        kind=CaseKind.CLEAN,
+        provenance=Provenance(
+            repo=args.repo, fix_commit=commit, licence=args.licence, clean_check=check
+        ),
+        base_ref=parent,
+        diff_path=f"{args.cases_dir.as_posix()}/{args.id}/change.diff",
+        bugs=[],
+    )
+    case_dir = args.cases_dir / args.id
+    if case_dir.exists():
+        shutil.rmtree(case_dir)
+    (case_dir / "base").mkdir(parents=True)
+    (case_dir / "change.diff").write_text(diff, encoding="utf-8")
+    for f in files:
+        content = show(repo, parent, f)
+        if content is not None:  # absent: the commit adds this file
+            dest = case_dir / "base" / f
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(content)
+
+    upsert(args.cases_dir / "manifest.jsonl", case)
+    return case
+
+
 def upsert(manifest: Path, case: Case) -> None:
     """Replace the case's line if its id exists, else append. Keeps the file valid."""
     cases = load_manifest(manifest) if manifest.exists() else []
@@ -321,7 +450,20 @@ def upsert(manifest: Path, case: Case) -> None:
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--repo-dir", type=Path, required=True, help="local clone to read")
-    p.add_argument("--fix", required=True, help="the fix commit")
+    p.add_argument(
+        "--fix", required=True, help="the fix commit (with --clean: the commit)"
+    )
+    p.add_argument(
+        "--clean",
+        action="store_true",
+        help="build a clean case from an ordinary commit",
+    )
+    p.add_argument(
+        "--later",
+        type=int,
+        default=CLEAN_LATER_COMMITS,
+        help="--clean: later commits that must leave its lines alone",
+    )
     p.add_argument("--list-hunks", action="store_true", help="print hunks and exit")
     p.add_argument("--id")
     p.add_argument("--repo", help="provenance, e.g. github.com/owner/name")
@@ -338,15 +480,16 @@ def main(argv: list[str] | None = None) -> int:
         for i, h in enumerate(parse_hunks(revert.diff0)):
             print(f"[{i}] {h.file} +{h.new_start},{h.new_count}\n{h.text}\n")
         return 0
-    missing = [
-        n for n in ("id", "repo", "licence", "bug_class") if not getattr(args, n)
-    ]
+    needed = ("id", "repo", "licence") + (() if args.clean else ("bug_class",))
+    missing = [n for n in needed if not getattr(args, n)]
     if missing:
         p.error(
             "required to write a case: "
             + ", ".join("--" + m.replace("_", "-") for m in missing)
         )
-    case = write_case(args)
+    if args.clean and (args.bug_class or args.truth):
+        p.error("--clean takes no --bug-class or --truth")
+    case = write_clean_case(args) if args.clean else write_case(args)
     print(json.dumps(case.model_dump(mode="json")))
     return 0
 

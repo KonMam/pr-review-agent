@@ -1,13 +1,18 @@
 # Golden set
 
-41 Go cases, one per line in `manifest.jsonl` (schema: `src/pr_review/models.py`).
-Each case is a fix commit reverted into a synthetic PR that reintroduces the bug.
+61 Go cases, one per line in `manifest.jsonl` (schema: `src/pr_review/models.py`):
+
+- **41 bug cases** (`kind: bug`): a fix commit reverted into a synthetic PR
+  that reintroduces the bug.
+- **20 clean cases** (`kind: clean`): an ordinary commit with no known bug,
+  as it was. Every finding on one is a false positive. See "Clean cases" below.
 
 | Path | What |
 |---|---|
 | `manifest.jsonl` | one `Case` per line: provenance, base ref, bug class, ground truth |
-| `<id>/buggy.diff` | the revert of the fix, non-test `.go` files only |
-| `<id>/base/` | every file the diff touches, at the fix commit (the PR's base), minus comments the fix added |
+| `<id>/buggy.diff` | bug case: the revert of the fix, non-test `.go` files only |
+| `<id>/change.diff` | clean case: the commit itself, non-test `.go` files only |
+| `<id>/base/` | every file the diff touches at the PR's base: the fix commit minus comments the fix added (bug case), or the commit's parent (clean case) |
 | `licences/` | upstream licence text for each OSS repo, copied for attribution |
 | `build.sh` | rebuilds everything from the commit list in it (needs network) |
 
@@ -70,3 +75,34 @@ searching messages for each class, then kept only if the non-test Go change
 was small (about 30 lines or less, 1-2 files) and the bug fits the class.
 
 `defer_in_loop` has only 2 cases: real fixes for it are rare in these repos.
+
+## Clean cases
+
+`uv run python -m pr_review.make_case --clean` (lines with class `clean` in
+`build.sh`) turns an ordinary commit into a case: the diff is the commit's
+non-test Go change, the base is its parent, and `bugs` is empty. Nothing is
+stripped, since there is no label to leak.
+
+A commit is kept only if it passes a check the builder runs: blame the files
+at the 20th commit after it (first-parent, towards the clone's HEAD). Every
+line the commit added must still come from it, and no line within ±3 of one
+may come from any commit in between, including ones on branches merged
+in that range. So no later fix (or any other edit)
+touched or inserted next to what it changed. The provenance records it as
+`clean_check: {later_commits: 20, checked_at: <sha>}`. The check is strict:
+a refactor nearby rejects a commit as surely as a fix does. It can't see a
+latent bug fixed later than that, or by a change elsewhere, so precision on
+clean cases is a lower bound.
+
+They were picked from messages that read as features or refactors (`feat`,
+`add`, `refactor`, `[ADDED]`), 1-2 non-test Go files, with 10-80 diff lines like
+the bug cases (15-77 here), from the same 13 OSS repos (no groupcache commit
+passed). Messages that mention a fix, bug, race, leak, panic or nil were
+skipped before checking.
+
+**Own repos: none.** go-taskqueue has 29 commits, and the four early feature
+commits with 20 after them all had their lines rewritten later (the server
+was refactored, and two of the bug cases fix those lines). duckserve (9),
+dagr (10) and dungeon (12) have too few commits for the check. gbemu (35)
+wasn't searched: it is private, so its cases couldn't go to item 6's public
+CodeRabbit sandbox, and the OSS repos already gave 20.

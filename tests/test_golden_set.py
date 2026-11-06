@@ -1,7 +1,8 @@
 """The committed golden set: schema, balance, and that every diff applies, offline.
 
-Everything this needs is under `cases/`: each case's `buggy.diff` and the
-files it touches at the base commit (`base/`). No network, no source repos.
+Everything this needs is under `cases/`: each case's diff (`buggy.diff`, or
+`change.diff` for a clean case) and the files it touches at the base commit
+(`base/`). No network, no source repos.
 """
 
 import shutil
@@ -13,20 +14,23 @@ import pytest
 
 from pr_review.make_case import is_reviewed_file, strip_comment
 from pr_review.manifest import load_manifest
-from pr_review.models import Case
+from pr_review.models import Case, CaseKind
 
 ROOT = Path(__file__).resolve().parent.parent
 CASES_DIR = ROOT / "cases"
 CASES = load_manifest(CASES_DIR / "manifest.jsonl")
+BUG_CASES = [c for c in CASES if c.kind is CaseKind.BUG]
+CLEAN_CASES = [c for c in CASES if c.kind is CaseKind.CLEAN]
 
 
-def test_size_is_30_to_50() -> None:
-    assert 30 <= len(CASES) <= 50
+def test_size_is_30_to_50_bug_cases_and_15_to_20_clean() -> None:
+    assert 30 <= len(BUG_CASES) <= 50
+    assert 15 <= len(CLEAN_CASES) <= 20
 
 
 def test_no_bug_class_is_more_than_half() -> None:
-    cls, n = Counter(c.bug_class for c in CASES).most_common(1)[0]
-    assert n <= len(CASES) / 2, f"{cls} is {n} of {len(CASES)} cases"
+    cls, n = Counter(c.bug_class for c in BUG_CASES).most_common(1)[0]
+    assert n <= len(BUG_CASES) / 2, f"{cls} is {n} of {len(BUG_CASES)} cases"
 
 
 def test_every_case_is_go() -> None:
@@ -36,8 +40,20 @@ def test_every_case_is_go() -> None:
 
 def test_base_ref_is_the_fix_commit() -> None:
     # The synthetic PR reverts the fix, so it applies on top of the fix commit.
-    for c in CASES:
+    for c in BUG_CASES:
         assert c.base_ref == c.provenance.fix_commit, c.id
+
+
+@pytest.mark.parametrize("case", CLEAN_CASES, ids=lambda c: c.id)
+def test_clean_case_is_checked_and_sized_like_the_bug_cases(case: Case) -> None:
+    # Base is the commit's parent (a 40-hex sha, not the commit itself), the
+    # check covered 20 later commits, and the diff is 10-80 lines.
+    assert case.base_ref != case.provenance.fix_commit
+    assert len(case.base_ref) == 40
+    check = case.provenance.clean_check
+    assert check is not None and check.later_commits >= 20
+    n = len((ROOT / case.diff_path).read_text(encoding="utf-8").splitlines())
+    assert 10 <= n <= 80, n
 
 
 @pytest.mark.parametrize("case", CASES, ids=lambda c: c.id)
@@ -81,7 +97,7 @@ def test_diff_touches_only_non_test_go(case: Case) -> None:
     assert all(is_reviewed_file(f) for f in files), files
 
 
-@pytest.mark.parametrize("case", CASES, ids=lambda c: c.id)
+@pytest.mark.parametrize("case", BUG_CASES, ids=lambda c: c.id)
 def test_diff_deletes_no_comment_the_fix_added(case: Case) -> None:
     # A '-' line is a line the fix added. If it carries a comment, the comment
     # likely explains the fix ("avoid uint16 overflow") and leaks the label.

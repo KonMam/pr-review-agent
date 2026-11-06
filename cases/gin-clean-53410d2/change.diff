@@ -1,0 +1,28 @@
+diff --git a/context.go b/context.go
+index be55207..c7bc61f 100644
+--- a/context.go
++++ b/context.go
+@@ -386,6 +386,11 @@ func (c *Context) GetDuration(key any) time.Duration {
+ 	return getTyped[time.Duration](c, key)
+ }
+ 
++// GetError returns the value associated with the key as an error.
++func (c *Context) GetError(key any) error {
++	return getTyped[error](c, key)
++}
++
+ // GetIntSlice returns the value associated with the key as a slice of integers.
+ func (c *Context) GetIntSlice(key any) []int {
+ 	return getTyped[[]int](c, key)
+@@ -451,6 +456,11 @@ func (c *Context) GetStringSlice(key any) []string {
+ 	return getTyped[[]string](c, key)
+ }
+ 
++// GetErrorSlice returns the value associated with the key as a slice of errors.
++func (c *Context) GetErrorSlice(key any) []error {
++	return getTyped[[]error](c, key)
++}
++
+ // GetStringMap returns the value associated with the key as a map of interfaces.
+ func (c *Context) GetStringMap(key any) map[string]any {
+ 	return getTyped[map[string]any](c, key)

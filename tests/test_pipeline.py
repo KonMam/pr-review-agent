@@ -333,3 +333,51 @@ def test_parse_grades_rejects_malformed(content: str, error: str) -> None:
 def test_parse_grades_orders_by_index() -> None:
     content = '```json\n{"grades": [{"index": 1, "score": 0.2, "reason": "r"}, {"index": 0, "score": 1}]}\n```'
     assert parse_grades(content, 2) == [1.0, 0.2]
+
+
+def test_clean_case_findings_are_false_positives_in_every_slice(
+    project: Path,
+) -> None:
+    # store-002 becomes a clean case: same diff, no bugs. Both reviews return
+    # HIT (graded 0.9) and MISS (0.2), so on store-002 both are false positives.
+    manifest = project / "cases" / "manifest.jsonl"
+    bug, clean = (json.loads(line) for line in manifest.read_text().splitlines())
+    clean.update(kind="clean", bugs=[], bug_class=None)
+    clean["provenance"]["clean_check"] = {"later_commits": 20, "checked_at": "e" * 40}
+    manifest.write_text(json.dumps(bug) + "\n" + json.dumps(clean) + "\n")
+
+    def respond(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        if is_grade(body):
+            return grades_reply(0.9, 0.2), {}
+        return findings_reply(HIT, MISS), {}
+
+    with stub_server(respond) as stub:
+        assert run(project, stub.base_url, "cheap", "c", "--stages", "grade") == 0
+    summary, _ = results(project, "c")
+    assert summary["clean_cases"] == 1
+
+    single, graded = summary["ablation"]
+    # Single-pass: 4 findings, 1 matches (HIT on the bug case).
+    assert single["precision"]["mean"] == 0.25
+    assert single["recall"]["mean"] == 1.0
+    assert single["fp_per_clean_review"]["mean"] == 2.0
+    assert single["flagged_clean_share"]["mean"] == 1.0
+    assert single["by_kind"]["bug"]["precision"]["mean"] == 0.5
+    assert single["by_kind"]["bug"]["findings_per_review"] == 2
+    assert single["by_kind"]["clean"] == {
+        "fp_per_clean_review": {"mean": 2.0, "min": 2.0, "max": 2.0},
+        "flagged_clean_share": {"mean": 1.0, "min": 1.0, "max": 1.0},
+        "findings_per_review": 2,
+    }
+    # Grade keeps HIT only: right on the bug case, still wrong on the clean one.
+    assert graded["precision"]["mean"] == 0.5
+    assert graded["by_kind"]["bug"]["precision"]["mean"] == 1.0
+    assert graded["by_kind"]["clean"]["fp_per_clean_review"]["mean"] == 1.0
+    assert graded["by_kind"]["clean"]["findings_per_review"] == 1
+    assert summary["by_kind"]["clean"]["fp_per_clean_review"]["mean"] == 1.0
+
+    sweep = {r["threshold"]: r for r in summary["grade_sweep"]["rows"]}
+    assert sweep[0.0]["by_kind"]["clean"]["fp_per_clean_review"]["mean"] == 2.0
+    assert sweep[0.5]["by_kind"]["clean"]["flagged_clean_share"]["mean"] == 1.0
+    assert sweep[1.0]["by_kind"]["clean"]["flagged_clean_share"]["mean"] == 0.0
+    assert sweep[1.0]["by_kind"]["bug"]["recall"]["mean"] == 0.0
