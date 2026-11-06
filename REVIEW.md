@@ -1,6 +1,6 @@
 # REVIEW.md
 
-Instructions for automated reviewers on this repo: the `reviewer` subagent (pre-PR review) and any other review bot. Read CLAUDE.md first. The reviewer reads this file from `main`, so a branch can't rewrite its own rules.
+Instructions for automated reviewers on this repo: the `reviewer` subagent (pre-PR review) and any other review bot. Read AGENTS.md first. The reviewer reads this file from `main`, so a branch can't rewrite its own rules.
 
 ## What failure looks like here
 

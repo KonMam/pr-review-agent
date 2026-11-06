@@ -1,4 +1,4 @@
-# CLAUDE.md
+# AGENTS.md
 
 ## Project
 
@@ -44,4 +44,4 @@ Before saying any change is done, run `./verify.sh`. A Stop hook runs it too and
 
 One line each: what went wrong, and the rule. The lesson hook adds here when a mistake can't be caught by `verify.sh` or `REVIEW.md`.
 
-- (none yet)
+- Spec defaults came from the Decodo research (PHP/JS corpus, Anthropic API) instead of the owner's own setup. Rule: this reviewer is for the owner's Go code and runs on cheap OpenRouter models, since there are no Anthropic API credits, only a seat licence. Check every default against that before proposing it.

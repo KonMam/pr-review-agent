@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The gate. The Stop hook, /harness:commit, the reviewer and CI all run this.
 # Keep it fast (aim under 2 minutes) and deterministic. Add a step here
-# whenever a mistake can be caught mechanically. That beats a line in CLAUDE.md.
+# whenever a mistake can be caught mechanically. That beats a line in AGENTS.md.
 set -euo pipefail
 cd "$(dirname "$0")"
 
