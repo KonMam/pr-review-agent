@@ -1,0 +1,13 @@
+diff --git a/context.go b/context.go
+index baa4b0f..d2d5497 100644
+--- a/context.go
++++ b/context.go
+@@ -475,7 +475,7 @@ func (c *Context) QueryArray(key string) (values []string) {
+ 
+ func (c *Context) initQueryCache() {
+ 	if c.queryCache == nil {
+-		if c.Request != nil && c.Request.URL != nil {
++		if c.Request != nil {
+ 			c.queryCache = c.Request.URL.Query()
+ 		} else {
+ 			c.queryCache = url.Values{}

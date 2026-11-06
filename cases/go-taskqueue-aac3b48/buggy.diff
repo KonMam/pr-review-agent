@@ -1,0 +1,74 @@
+diff --git a/api/server.go b/api/server.go
+index fc02933..3ff29a4 100644
+--- a/api/server.go
++++ b/api/server.go
+@@ -16,6 +16,7 @@ import (
+ 
+ type Server struct {
+ 	dbPool *pgxpool.Pool
++	server *http.Server
+ }
+ 
+ func NewServer(addr string, dbPool *pgxpool.Pool) *http.Server {
+@@ -57,10 +58,7 @@ func (s *Server) getTask(w http.ResponseWriter, r *http.Request) {
+ 	}
+ 
+ 	w.Header().Set("Content-Type", "application/json")
+-	if err := json.NewEncoder(w).Encode(task); err != nil {
+-		http.Error(w, "[API] Encoding error", http.StatusInternalServerError)
+-		return
+-	}
++	json.NewEncoder(w).Encode(task)
+ }
+ 
+ func (s Server) postTask(w http.ResponseWriter, r *http.Request) {
+@@ -90,10 +88,7 @@ func (s Server) postTask(w http.ResponseWriter, r *http.Request) {
+ 	}
+ 
+ 	w.WriteHeader(http.StatusCreated)
+-	if err := json.NewEncoder(w).Encode(task); err != nil {
+-		http.Error(w, "[API] Encoding error", http.StatusInternalServerError)
+-		return
+-	}
++	json.NewEncoder(w).Encode(task)
+ }
+ 
+ func (s *Server) getTasks(w http.ResponseWriter, r *http.Request) {
+@@ -103,11 +98,11 @@ func (s *Server) getTasks(w http.ResponseWriter, r *http.Request) {
+ 	// ADD OFFSET
+ 
+ 	validValues := map[string]bool{
+-		"completed":  true,
++		"completed": true,
+ 		"processing": true,
+-		"queued":     true,
+-		"failed":     true,
+-		"":           true,
++		"queued":    true,
++		"failed":    true,
++		"":          true,
+ 	}
+ 
+ 	if !validValues[statusFilter] {
+@@ -148,18 +143,15 @@ func (s *Server) getTasks(w http.ResponseWriter, r *http.Request) {
+ 		tasks = append(tasks, task)
+ 	}
+ 
+-	w.Header().Set("Content-Type", "application/json")
+ 	if len(tasks) == 0 {
+-		if err := json.NewEncoder(w).Encode([]model.Task{}); err != nil {
+-			http.Error(w, "[API] Encoding error", http.StatusInternalServerError)
+-			return
+-		}
++		w.Header().Set("Content-Type", "application/json")
++		json.NewEncoder(w).Encode([]model.Task{})
+ 		return
+ 	}
+ 
++	w.Header().Set("Content-Type", "application/json")
+ 	if err := json.NewEncoder(w).Encode(tasks); err != nil {
+ 		http.Error(w, "[API] Encoding error", http.StatusInternalServerError)
+-		return
+ 	}
+ }
+ 

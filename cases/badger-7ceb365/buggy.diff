@@ -1,0 +1,14 @@
+diff --git a/kv.go b/kv.go
+index 580e70c..3f801c0 100644
+--- a/kv.go
++++ b/kv.go
+@@ -446,8 +446,7 @@ func (s *KV) fillItem(item *KVItem) error {
+ 		return nil
+ 	}
+ 	if (item.meta & BitValuePointer) == 0 {
+-		item.val = item.slice.Resize(len(item.vptr))
+-		copy(item.val, item.vptr)
++		item.val = item.vptr
+ 		return nil
+ 	}
+ 

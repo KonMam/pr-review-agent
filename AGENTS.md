@@ -2,7 +2,7 @@
 
 ## Project
 
-A model-agnostic, precision-first PR reviewer for the owner's Go code, with an offline eval set of reverted Go bug-fix commits scored on precision and recall, and a head-to-head against CodeRabbit. Prep POC for the Decodo internal AI platform role. Owner: Konstantinas. Status: case manifest schema, loader and scorer exist (`models.py`, `manifest.py`, `scoring.py`); no golden set or model calls yet. See `docs/specs/` for the plan. Anything marked *(planned)* doesn't exist yet; don't claim it runs until it does, and update this file when it lands.
+A model-agnostic, precision-first PR reviewer for the owner's Go code, with an offline eval set of reverted Go bug-fix commits scored on precision and recall, and a head-to-head against CodeRabbit. Prep POC for the Decodo internal AI platform role. Owner: Konstantinas. Status: case manifest schema, loader and scorer exist (`models.py`, `manifest.py`, `scoring.py`); the golden set is in `cases/` (41 cases, built by `make_case.py` and `cases/build.sh`); agent v0 exists: `arms.toml` loader, single-pass generator, budget guard and `pr-review eval` (`arms.py`, `llm.py`, `generate.py`, `evaluate.py`, `cli.py`), tested offline against a stub server on the real golden set. No paid baseline run yet. See `docs/specs/` for the plan. Anything marked *(planned)* doesn't exist yet; don't claim it runs until it does, and update this file when it lands.
 
 ## Commands
 
@@ -10,6 +10,7 @@ A model-agnostic, precision-first PR reviewer for the owner's Go code, with an o
 ./verify.sh      # the gate: the only definition of "works" here
 uv sync          # install
 uv run pytest -q # unit tests only
+uv run pr-review eval --arm ollama-gemma --runs 1 --case <id>   # manual local smoke, 1-2 small cases; never in verify.sh; paid arms need the owner's OK
 ```
 
 ## The Gate
@@ -29,7 +30,7 @@ Before saying any change is done, run `./verify.sh`. A Stop hook runs it too and
 
 - **Python** 3.13, **uv** for everything (`uv run`, `uv add`). ruff format + ruff check, mypy, pytest.
 - **pydantic** for the case manifest, findings and (later) validating model replies.
-- **Model calls** *(planned)*: OpenAI-compatible chat API via the `openai` client, through OpenRouter, using named arms in `arms.toml` *(planned)*. No Claude Agent SDK and no LiteLLM; see the spec's Decisions.
+- **Model calls**: OpenAI-compatible chat API via the `openai` client, through OpenRouter, using named arms in `arms.toml`. Each eval run has a hard budget (`--budget-usd`, default $1). Base files come from `cases/<id>/base/` (next to each case's `buggy.diff`), so an eval needs no clones and no network. No Claude Agent SDK and no LiteLLM; see the spec's Decisions.
 - Every new dependency needs a reason in the PR.
 
 ## Layout
@@ -39,6 +40,7 @@ Before saying any change is done, run `./verify.sh`. A Stop hook runs it too and
 | `src/pr_review/` | the agent and the eval harness |
 | `tests/` | unit tests (`verify.sh` runs them) |
 | `docs/specs/` | specs: acceptance criteria, out of scope, plan |
+| `cases/` | golden set: manifest, buggy diffs, base files (see its README) |
 | `results/`, `cache/` | eval outputs and cached API responses (gitignored) |
 
 ## Known Mistakes

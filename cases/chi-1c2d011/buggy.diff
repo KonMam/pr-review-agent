@@ -1,0 +1,15 @@
+diff --git a/middleware/url_format.go b/middleware/url_format.go
+index 2ec6657..d8a651e 100644
+--- a/middleware/url_format.go
++++ b/middleware/url_format.go
+@@ -63,9 +63,7 @@ func URLFormat(next http.Handler) http.Handler {
+ 				idx += base
+ 				format = path[idx+1:]
+ 
+-				if rctx != nil {
+-					rctx.RoutePath = path[:idx]
+-				}
++				rctx.RoutePath = path[:idx]
+ 			}
+ 		}
+ 

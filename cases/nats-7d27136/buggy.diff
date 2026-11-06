@@ -1,0 +1,14 @@
+diff --git a/nats.go b/nats.go
+index 0570309..e11136a 100644
+--- a/nats.go
++++ b/nats.go
+@@ -2332,9 +2332,6 @@ func (nc *Conn) close(status Status, doCBs bool) {
+ 		s.closed = true
+ 		// Mark connection closed in subscription
+ 		s.connClosed = true
+-		if s.typ == AsyncSubscription && s.pCond != nil {
+-			s.pCond.Signal()
+-		}
+ 
+ 		s.mu.Unlock()
+ 	}

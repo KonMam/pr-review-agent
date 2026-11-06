@@ -1,0 +1,52 @@
+diff --git a/osscluster.go b/osscluster.go
+index 12bed5e..efd5296 100644
+--- a/osscluster.go
++++ b/osscluster.go
+@@ -1649,12 +1649,10 @@ func (c *ClusterClient) mapCmdsByNode(ctx context.Context, cmdsMap *cmdsMap, cmd
+ 				if len(state.Masters) == 0 {
+ 					return errClusterNoNodes
+ 				}
+-				idx := c.opt.ShardPicker.Next(len(state.Masters) + len(state.Slaves))
+-				if idx < len(state.Masters) {
+-					node = state.Masters[idx]
+-				} else {
+-					node = state.Slaves[idx-len(state.Masters)]
+-				}
++				// For read-only keyless commands, pick from all nodes (masters + slaves)
++				allNodes := append(state.Masters, state.Slaves...)
++				idx := c.opt.ShardPicker.Next(len(allNodes))
++				node = allNodes[idx]
+ 			} else {
+ 				node, err = c.slotReadOnlyNode(state, slot)
+ 				if err != nil {
+diff --git a/osscluster_router.go b/osscluster_router.go
+index bc14f6c..0da2953 100644
+--- a/osscluster_router.go
++++ b/osscluster_router.go
+@@ -85,9 +85,7 @@ func (c *ClusterClient) executeOnAllNodes(ctx context.Context, cmd Cmder, policy
+ 		return err
+ 	}
+ 
+-	nodes := make([]*clusterNode, 0, len(state.Masters)+len(state.Slaves))
+-	nodes = append(nodes, state.Masters...)
+-	nodes = append(nodes, state.Slaves...)
++	nodes := append(state.Masters, state.Slaves...)
+ 	if len(nodes) == 0 {
+ 		return errClusterNoNodes
+ 	}
+@@ -496,11 +494,10 @@ func (c *ClusterClient) pickArbitraryNode(ctx context.Context) *clusterNode {
+ 		return nil
+ 	}
+ 
+-	idx := c.opt.ShardPicker.Next(len(state.Masters) + len(state.Slaves))
+-	if idx < len(state.Masters) {
+-		return state.Masters[idx]
+-	}
+-	return state.Slaves[idx-len(state.Masters)]
++	allNodes := append(state.Masters, state.Slaves...)
++
++	idx := c.opt.ShardPicker.Next(len(allNodes))
++	return allNodes[idx]
+ }
+ 
+ // hasKeys checks if a command operates on keys

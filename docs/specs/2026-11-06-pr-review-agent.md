@@ -7,6 +7,7 @@
 - [ ] **Golden set.** `cases/manifest.jsonl` holds 30-50 cases.
   - Each case has provenance (repo, fix commit SHA, licence), the buggy diff, and ground truth as file + line range.
   - Every case is Go. At least 8 come from my own Go repos, and the rest from permissively licensed OSS Go repos.
+    **Not met:** item 2 found only 3 usable own-repo fixes (all go-taskqueue); see `cases/README.md`. The set has 41 cases, 38 of them OSS.
   - Each case is tagged with a Go bug class (see Design). No single class makes up more than half the set.
   - A test in `./verify.sh` checks the manifest schema and that every case's diff applies cleanly to its base.
 - [ ] **Scorer.** One scorer, shared by both arms, computes precision, recall and F1 using the matching rule below. It's unit-tested on hand-built fixtures in `./verify.sh`, with no network calls.
@@ -71,7 +72,7 @@ These same classes are the tags on golden-set cases.
 One item per session and PR.
 
 - [x] 1. **Case format and scorer:** the manifest schema, loader, matching rule, and P/R/F1 with unit tests on fixtures. No model calls. Update AGENTS.md, which still says "Claude Agent SDK" and "LiteLLM gateway", to match the Decisions below.
-- [ ] 2. **Golden set:** a script that turns a fix commit into a case (revert the fix → buggy diff, fix hunks → ground truth). Curate 30-50 Go cases from my Go repos and from permissively licensed OSS Go repos, tagged by bug class. Add the manifest validation test.
+- [x] 2. **Golden set:** a script that turns a fix commit into a case (revert the fix → buggy diff, fix hunks → ground truth). Curate 30-50 Go cases from my Go repos and from permissively licensed OSS Go repos, tagged by bug class. Add the manifest validation test.
 - [ ] 3. **Agent v0:** the `arms.toml` loader, a single-pass generator, the budget guard, and `eval` with repeated runs, caching, cost and latency. Run it with the cheapest arm to get the first baseline.
 - [ ] 4. **Multi-stage pipeline:** grade, dedup and suppress, each toggleable, plus the threshold sweep and the ablation table.
 - [ ] 5. **Model ladder:** rerun the best pipeline on 2-3 arms from cheapest to stronger, to see whether a stronger model buys enough precision or recall to justify its cost. Also try read-only tools as an ablation.
@@ -84,7 +85,7 @@ One item per session and PR.
 - **Model access: OpenRouter, behind config-defined arms. The Anthropic API is rejected for now.**
   - There are no Anthropic API credits; only a seat licence, which doesn't cover API use from my own code.
   - Models have to be swappable fast. OpenRouter gives one OpenAI-compatible endpoint across providers, one key for this project with a monthly limit, and a small prepaid balance with auto top-up off, which makes the balance a hard ceiling. It also reports cost per request.
-  - Local Ollama (`qwen3.5:9b`) is a free arm for smoke tests, not for scored runs.
+  - Local Ollama (`gemma4:e4b-it-qat`) is a free arm for smoke tests, not for scored runs. It's the fast, reliable one on the owner's M1 Pro (~30 tok/s decode, every JSON-extraction task right); `qwen3.5:9b` stalls for minutes on long prompts. A smoke run is 1-2 small cases, 1 run, a 120s per-request timeout and capped output, run by hand. Local models are never part of `./verify.sh` or the unit tests, and never run on the full golden set.
   - DeepSeek direct, with the existing key, is a fallback arm.
   - This follows the personal gateway decision doc, which also rejects a standing LiteLLM.
 - **Start on the cheapest tier.** The first baseline uses a cheap-tier model, such as DeepSeek V4.1 Flash, for both generate and grade.
@@ -113,5 +114,6 @@ One item per session and PR.
 ## Open questions
 
 - **Are my own repos public?** The CodeRabbit sandbox would republish their code. If they're private, own-repo cases run on the agent arm only.
+  - *Answered in item 2 (`gh repo view`, 2026-11-06):* go-taskqueue and duckserve are public; gbemu, dagr and dungeon are private. All 3 own-repo cases are from go-taskqueue, so all of them can go to the CodeRabbit sandbox. The remaining open question is only how to get more own-repo cases.
 - **CodeRabbit's free-tier limits** (rate, PR size) on a sandbox with 30-50 PRs. Check them in item 6 before building the case-to-PR script.
 - **OpenRouter privacy settings.** Exclude providers that train on or retain prompts before sending any code. That's fine for public OSS and my own code, but not for anyone else's.

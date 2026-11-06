@@ -1,0 +1,38 @@
+diff --git a/errors.go b/errors.go
+index 85efb24..9a9a734 100644
+--- a/errors.go
++++ b/errors.go
+@@ -80,14 +80,14 @@ var (
+ 	ErrInvalidDump = errors.New("Data dump cannot be read")
+ )
+ 
+-const maxKeySize = 1 << 16
++const maxKeySize = 1 << 20
+ 
+ func exceedsMaxKeySizeError(key []byte) error {
+-	return errors.Errorf("Key with size %d exceeded %d limit. Key:\n%s",
+-		len(key), maxKeySize, hex.Dump(key[:1<<10]))
++	return errors.Errorf("Key with size %d exceeded %dMiB limit. Key:\n%s",
++		len(key), maxKeySize>>20, hex.Dump(key[:1<<10]))
+ }
+ 
+ func exceedsMaxValueSizeError(value []byte, maxValueSize int64) error {
+-	return errors.Errorf("Value with size %d exceeded ValueLogFileSize (%d). Key:\n%s",
+-		len(value), maxValueSize, hex.Dump(value[:1<<10]))
++	return errors.Errorf("Value with size %d exceeded ValueLogFileSize (%dMiB). Key:\n%s",
++		len(value), maxValueSize>>20, hex.Dump(value[:1<<10]))
+ }
+diff --git a/table/iterator.go b/table/iterator.go
+index 2600ab9..8fe5aff 100644
+--- a/table/iterator.go
++++ b/table/iterator.go
+@@ -110,8 +110,7 @@ func (itr *blockIterator) SeekToLast() {
+ // parseKV would allocate a new byte slice for key and for value.
+ func (itr *blockIterator) parseKV(h header) {
+ 	if cap(itr.key) < int(h.plen+h.klen) {
+-		sz := int(h.plen) + int(h.klen)
+-		itr.key = make([]byte, 2*sz)
++		itr.key = make([]byte, 2*(h.plen+h.klen))
+ 	}
+ 	itr.key = itr.key[:h.plen+h.klen]
+ 	copy(itr.key, itr.baseKey[:h.plen])
