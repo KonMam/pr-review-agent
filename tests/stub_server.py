@@ -26,6 +26,7 @@ class Stub:
     base_url: str
     requests: list[dict[str, Any]] = field(default_factory=list)
     auth_headers: list[str] = field(default_factory=list)
+    headers: list[dict[str, str]] = field(default_factory=list)  # names lowercased
 
 
 @contextmanager
@@ -40,6 +41,8 @@ def stub_server(respond: Responder) -> Iterator[Stub]:
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             stub.requests.append(body)
             stub.auth_headers.append(self.headers.get("Authorization", ""))
+            # Lowercased names: HTTP header names are case-insensitive.
+            stub.headers.append({k.lower(): v for k, v in self.headers.items()})
             try:
                 content, usage_extra = respond(body)
             except StubError as e:

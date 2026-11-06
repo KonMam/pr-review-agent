@@ -68,6 +68,7 @@ model = "other-vendor/other-model"
 reports_cost = true
 json_mode = false
 extra_body = {{ provider = {{ data_collection = "deny" }} }}
+extra_headers = {{ HTTP-Referer = "https://example.com/app", X-OpenRouter-Title = "stub-app" }}
 
 # Worst case per call is exactly $0.10: input is free, 1000 output tokens max.
 [arms.tight]
@@ -182,6 +183,16 @@ def test_two_arms_differ_only_in_config(project: Path) -> None:
     )
     assert all("response_format" not in r for r in stub.requests[4:])
     assert all(r["provider"] == {"data_collection": "deny"} for r in stub.requests[4:])
+    # Attribution headers reach the server only for the arm that sets them.
+    assert all(
+        h.get("http-referer") == "https://example.com/app"
+        and h.get("x-openrouter-title") == "stub-app"
+        for h in stub.headers[4:]
+    )
+    assert all(
+        "http-referer" not in h and "x-openrouter-title" not in h
+        for h in stub.headers[:4]
+    )
 
     # The model sees the diff and the base file, never the ground truth.
     user = stub.requests[0]["messages"][1]["content"]

@@ -53,6 +53,9 @@ class Arm(BaseModel):
     # Sent as-is in the request body, e.g. OpenRouter's `provider` routing
     # options (`data_collection = "deny"`).
     extra_body: dict[str, Any] = Field(default_factory=dict)
+    # Sent as HTTP headers on every request, e.g. OpenRouter's app attribution
+    # (`HTTP-Referer`, `X-OpenRouter-Title`). Not part of `config_hash`.
+    extra_headers: dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _cost_known(self) -> Self:
@@ -63,9 +66,12 @@ class Arm(BaseModel):
         return self
 
     def config_hash(self) -> str:
-        """Hash of everything that can change a reply. The name and price are left out:
-        renaming an arm or correcting its price shouldn't throw away cached replies."""
-        relevant = self.model_dump(exclude={"name", "price", "reports_cost"})
+        """Hash of everything that can change a reply. The name, price and headers are
+        left out: renaming an arm, correcting its price or changing attribution
+        headers shouldn't throw away cached replies."""
+        relevant = self.model_dump(
+            exclude={"name", "price", "reports_cost", "extra_headers"}
+        )
         blob = json.dumps(relevant, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(blob.encode()).hexdigest()[:16]
 

@@ -27,6 +27,10 @@ reports_cost = true
 price = { input_per_mtok = 0.051, output_per_mtok = 0.567 }  # fallback, 2026-11-06 list price
 temperature = 0.2
 extra_body = { provider = { data_collection = "deny" }, usage = { include = true } }
+# App attribution, so OpenRouter's Activity page names this app instead of
+# "Unknown". X-OpenRouter-Title is the current name (X-Title is the legacy one).
+# Headers are left out of config_hash, so editing them keeps cached replies.
+extra_headers = { HTTP-Referer = "https://github.com/KonMam/pr-review-agent", X-OpenRouter-Title = "pr-review-agent" }
 
 # Fallback: DeepSeek direct with the existing key.
 [arms.deepseek-direct]

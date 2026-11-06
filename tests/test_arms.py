@@ -63,7 +63,7 @@ def test_unknown_arm_names_known_ones(tmp_path: Path) -> None:
         load_arm(REPO_ARMS, "nope")
 
 
-def test_config_hash_ignores_name_and_price_only(tmp_path: Path) -> None:
+def test_config_hash_ignores_name_and_price(tmp_path: Path) -> None:
     base = '[arms.{n}]\nbase_url = "u"\napi_key_env = "K"\nmodel = "{m}"\n'
     path = write(
         tmp_path,
@@ -77,3 +77,31 @@ def test_config_hash_ignores_name_and_price_only(tmp_path: Path) -> None:
     arms = load_arms(path)
     assert arms["a"].config_hash() == arms["b"].config_hash()
     assert arms["a"].config_hash() != arms["c"].config_hash()
+
+
+def test_config_hash_ignores_extra_headers(tmp_path: Path) -> None:
+    base = '[arms.{n}]\nbase_url = "u"\napi_key_env = "K"\nmodel = "m"\nreports_cost = true\n'
+    path = write(
+        tmp_path,
+        base.format(n="plain")
+        + base.format(n="attributed")
+        + 'extra_headers = { HTTP-Referer = "https://x", X-OpenRouter-Title = "t" }\n',
+    )
+    arms = load_arms(path)
+    assert arms["attributed"].extra_headers == {
+        "HTTP-Referer": "https://x",
+        "X-OpenRouter-Title": "t",
+    }
+    assert arms["plain"].config_hash() == arms["attributed"].config_hash()
+
+
+def test_repo_openrouter_arms_send_attribution_headers() -> None:
+    openrouter = [
+        a for a in load_arms(REPO_ARMS).values() if "openrouter.ai" in a.base_url
+    ]
+    assert openrouter
+    for arm in openrouter:
+        assert arm.extra_headers == {
+            "HTTP-Referer": "https://github.com/KonMam/pr-review-agent",
+            "X-OpenRouter-Title": "pr-review-agent",
+        }

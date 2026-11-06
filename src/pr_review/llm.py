@@ -141,7 +141,11 @@ def make_client(arm: Arm) -> OpenAI:
     # max_retries=0: retries are this harness's call (see `chat`), and each one
     # must stay within the call's budget reservation.
     return OpenAI(
-        base_url=arm.base_url, api_key=key, timeout=arm.timeout_s, max_retries=0
+        base_url=arm.base_url,
+        api_key=key,
+        timeout=arm.timeout_s,
+        max_retries=0,
+        default_headers=arm.extra_headers or None,
     )
 
 
