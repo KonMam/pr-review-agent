@@ -2,7 +2,7 @@
 
 ## Project
 
-A PR-review agent on the Claude Agent SDK, with an offline eval set of past PRs with known bugs scored on precision and recall, and a head-to-head against one bought review tool. Prep POC for the Decodo internal AI platform role. Owner: Konstantinas. Status: scaffold only; see `docs/specs/` for the plan. Anything marked *(planned)* doesn't exist yet; don't claim it runs until it does, and update this file when it lands.
+A model-agnostic, precision-first PR reviewer for the owner's Go code, with an offline eval set of reverted Go bug-fix commits scored on precision and recall, and a head-to-head against CodeRabbit. Prep POC for the Decodo internal AI platform role. Owner: Konstantinas. Status: case manifest schema, loader and scorer exist (`models.py`, `manifest.py`, `scoring.py`); no golden set or model calls yet. See `docs/specs/` for the plan. Anything marked *(planned)* doesn't exist yet; don't claim it runs until it does, and update this file when it lands.
 
 ## Commands
 
@@ -28,7 +28,8 @@ Before saying any change is done, run `./verify.sh`. A Stop hook runs it too and
 ## Tech Stack
 
 - **Python** 3.13, **uv** for everything (`uv run`, `uv add`). ruff format + ruff check, mypy, pytest.
-- **Claude Agent SDK** *(planned)*. Model calls go through the LiteLLM gateway from `~/projects/ai-enablement-lead/llm-routing-bench` with this project's own team key and budget *(planned)*.
+- **pydantic** for the case manifest, findings and (later) validating model replies.
+- **Model calls** *(planned)*: OpenAI-compatible chat API via the `openai` client, through OpenRouter, using named arms in `arms.toml` *(planned)*. No Claude Agent SDK and no LiteLLM; see the spec's Decisions.
 - Every new dependency needs a reason in the PR.
 
 ## Layout

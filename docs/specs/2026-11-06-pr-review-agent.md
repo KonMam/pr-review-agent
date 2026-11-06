@@ -70,7 +70,7 @@ These same classes are the tags on golden-set cases.
 
 One item per session and PR.
 
-- [ ] 1. **Case format and scorer:** the manifest schema, loader, matching rule, and P/R/F1 with unit tests on fixtures. No model calls. Update AGENTS.md, which still says "Claude Agent SDK" and "LiteLLM gateway", to match the Decisions below.
+- [x] 1. **Case format and scorer:** the manifest schema, loader, matching rule, and P/R/F1 with unit tests on fixtures. No model calls. Update AGENTS.md, which still says "Claude Agent SDK" and "LiteLLM gateway", to match the Decisions below.
 - [ ] 2. **Golden set:** a script that turns a fix commit into a case (revert the fix → buggy diff, fix hunks → ground truth). Curate 30-50 Go cases from my Go repos and from permissively licensed OSS Go repos, tagged by bug class. Add the manifest validation test.
 - [ ] 3. **Agent v0:** the `arms.toml` loader, a single-pass generator, the budget guard, and `eval` with repeated runs, caching, cost and latency. Run it with the cheapest arm to get the first baseline.
 - [ ] 4. **Multi-stage pipeline:** grade, dedup and suppress, each toggleable, plus the threshold sweep and the ablation table.
