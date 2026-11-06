@@ -18,6 +18,13 @@
   - It also has an ablation table: single-pass, then adding grade, dedup and suppress one at a time.
   - Every run has a hard budget enforced in code (default $1), and the provider key has its own spend limit as a backstop.
 - [ ] **No style comments.** Across all cases and runs, the agent posts zero findings in a suppressed category (style, naming, formatting, docs, readability). A test on the stored results checks this.
+- [ ] **Findings log.** Every CI review writes a JSONL log of each posted finding and uploads it as a workflow artifact (item 8).
+  - Each record has: repo, PR number, head SHA, file, line range, category, claim, arm/model id, prompt version, stage versions, and grade score if graded.
+  - A test checks the record schema against a stub review, with no network calls.
+- [ ] **Feedback loop.** After merge, each logged finding gets its signals, and outcomes are promoted into the golden set (item 9).
+  - Promoted cases carry `source: production` in their provenance, and the manifest test accepts them.
+  - A prompt or model change is only used by CI if the eval matches or beats the current golden-set scores.
+  - A monthly report gives the addressed rate and the 👎 rate.
 - [ ] **Build vs buy.** CodeRabbit's comments on the same cases are scored by the same scorer. `docs/build-vs-buy.md` puts both arms in one table and ends with a recommendation that names its main caveat. The table covers precision, recall, F1, cost per review, latency and setup effort.
 
 ## Out of scope
@@ -28,7 +35,7 @@
 - Languages other than Go. The harness itself stays in Python, but the reviewer's prompt, bug classes and corpus are Go-only.
 - Multi-repo deployment, org-wide rollout, GitHub App installation.
 - A UI or dashboard. Results are JSON plus one markdown report.
-- Production signals: 👍/👎 buttons and "addressed rate" on live PRs. Uber shows these are the right long-term metric, but they need real traffic. Deferred.
+- Org-wide production signals. 👍/👎 and "addressed rate" are now item 9, scoped to one repo. Uber shows these are the right long-term metric, but rolling them out across an org, or any dashboard for them, stays out of scope.
 - A self-hosted gateway (LiteLLM) or any change to `llm-routing-bench`. See `~/projects/decisions/2026-11-06-personal-llm-gateway.md`.
 - The Claude Agent SDK as the core loop. It may come back later as one arm once there are API credits. See Decisions.
 - Assistants beyond bugs: no AppSec or "best practices" reviewer. uReview has three; this POC builds one.
@@ -81,6 +88,14 @@ One item per session and PR.
 - [ ] 6. **CodeRabbit arm:** a public sandbox GitHub repo with one PR per case. Collect CodeRabbit's comments, normalise them to findings, and score them. **This needs my OK before any remote is created or anything is pushed.**
 - [ ] 7. **`docs/build-vs-buy.md`:** the comparison table, the hand-check results, and the recommendation.
 - [ ] 8. **CI on one Go repo:** a GitHub Action, defined in this repo, that reviews a Go repo's PRs with inline comments. This is the "would I actually use it" check. It runs on one of my Go repos, and wiring it in there **needs my OK first**, since it touches an existing project. One repo only.
+  - Every CI review also writes a JSONL log of each posted finding and uploads it as a workflow artifact. Each record has repo, PR number, head SHA, file, line range, category, claim, arm/model id, prompt and stage versions, and grade score if graded. This is the input to item 9, so it ships from the first CI run.
+- [ ] 9. **Feedback loop:** learn from real use on that one repo. Needs item 8's log. Traffic on my repos is low (a handful of PRs a month), so the realistic loop is a **weekly hand-read** of the logged findings plus promotions; the automated signals are a bonus, not something to wait on.
+  - **Signals, collected after a PR merges, per logged finding:** 👍/👎 reactions on the inline comment, and "addressed": the flagged lines changed in a later commit of the same PR before merge. uReview found addressed to be the most useful signal.
+  - **Promotion into the golden set,** using the existing builders, with `source: production` in the case's provenance:
+    - an unaddressed or 👎 finding becomes a false-positive case: that diff, no bug at that location;
+    - a bug found later by a fix commit that the reviewer missed becomes a bug case through the fix-commit builder (`make_case.py`).
+  - **Regression gate:** any prompt or model change must match or beat the current golden-set scores before CI uses it. The eval runs this check.
+  - **Report:** a monthly addressed rate and 👎 rate, as a markdown file. No dashboard.
 
 ## Baseline
 
@@ -217,6 +232,7 @@ The best F0.5 is at 0.3 (0.1-0.3 tie, and the highest wins), so the default stay
   - The cost: one bug per case, and these PRs are cleaner than real ones, which usually mix the bug with unrelated changes.
   - To offset this, where a fix commit carries other edits, those edits are kept in the diff as noise.
 - **Clean cases make false positives measurable.** With one bug per small diff and about one finding per review, nearly every finding lands within ±3 lines of the bug, so precision on bug-only cases sat at 0.99 and a precision stage (grade) could only lose recall (item 4). Bug-free commits give the reviewer real chances to be wrong. They are taken from history, not written, and a commit counts as clean only if no later commit within 20 changes or inserts lines within ±3 of the lines it added: a conservative proxy for "not followed by a fix", since any later edit there rejects it. A latent bug the check can't see would make a correct finding count as a false positive, so clean-case precision is a lower bound.
+- **Learn from real PRs via a findings log and promotions.** Real cases fix the golden set's main weakness: reverted fixes are cleaner than real PRs. The log is cheap to add from day one, and without it item 9 has nothing to read. With low traffic, weekly hand-reading beats waiting for automated signals.
 - **Comparison arm: CodeRabbit.** It's the market leader, free on public repos, and makes the vendor benchmark claims (Martian bench) that this setup can test.
   - Rejected: Copilot review (needs a seat), Greptile (paid trial), Claude Code GH Action (same model family as the agent, so it says little about build vs buy).
 - **Precision first.** Public benchmarks put the best tools around 50% precision and 50% recall, and raising recall adds noise fast. The threshold is chosen for precision, and recall is reported, not optimised.
