@@ -2,9 +2,11 @@
 
 `pr-review post` reads `pr-review review`'s report and the same diff, and makes
 one PR review (event COMMENT, never APPROVE or REQUEST_CHANGES) through the REST
-API with the token in `GITHUB_TOKEN`. Comments are terse: the category and the
-claim. A finding whose lines aren't in the diff can't be an inline comment, so
-it goes in the review body instead. Suppressed categories are dropped here too,
+API with the token in `GITHUB_TOKEN`. Comments are terse (item 8b): a badge
+with the readable category, the claim's first sentence as a bold title, and the
+rest of the claim as one short paragraph. The review body is one count line and
+a footer with the model and cost. A finding whose lines aren't in the diff can't
+be an inline comment, so it is written out in the review body instead. Suppressed categories are dropped here too,
 whatever stages ran, so no style comment is ever posted.
 
 Every posted finding becomes one line of the JSONL findings log (item 8), the
@@ -25,11 +27,37 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from pr_review.review import Report, ReportFinding
-from pr_review.stages import is_suppressed
+from pr_review.stages import is_suppressed, normalise_category
 
 DEFAULT_API_URL = "https://api.github.com"
+DEFAULT_SERVER_URL = "https://github.com"
 MARKER = "<!-- pr-review -->"  # tags our reviews and comments
-MAX_CLAIM_CHARS = 600
+MAX_TITLE_CHARS = 160
+MAX_WHY_CHARS = 400
+
+# Readable names for the generate prompt's categories. Anything else (another
+# arm's wording) is shown as words, so no snake_case id is ever posted.
+CATEGORY_LABELS = {
+    "nil_deref": "Nil dereference",
+    "ignored_err": "Ignored error",
+    "goroutine_leak": "Goroutine leak",
+    "data_race": "Data race",
+    "defer_in_loop": "Defer in loop",
+    "slice_aliasing": "Slice aliasing",
+    "context_propagation": "Context propagation",
+    "overflow_off_by_one": "Overflow or off-by-one",
+    "unclosed_resource": "Unclosed resource",
+    "other_bug": "Other bug",
+}
+
+# A sentence ends at . ! or ? and a space; "e.g." and friends don't end one.
+# Go claims often start a sentence with a lowercase identifier, so the next
+# character can be anything.
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+(?=\S)")
+_ABBREVIATION = re.compile(r"(?:^|[\s(])(?:e\.g|i\.e|etc|vs|cf)\.$", re.IGNORECASE)
+# Where a too-long first sentence may be cut: after , ; : or around a dash.
+_CLAUSE = re.compile(r"[,;:](?=\s)|\s(?=[—–-]\s)")
+_MIN_TITLE_CHARS = 40  # a clause cut shorter than this reads as a fragment
 
 _HUNK = re.compile(r"^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
@@ -99,11 +127,98 @@ def anchor(rf: ReportFinding, lines: dict[str, list[set[int]]]) -> Anchor | None
     return None
 
 
+def category_label(category: str) -> str:
+    """The readable name of a category: `ignored_err` -> "Ignored error"."""
+    key = normalise_category(category)
+    if key in CATEGORY_LABELS:
+        return CATEGORY_LABELS[key]
+    words = key.replace("_", " ").strip()
+    return words[:1].upper() + words[1:] if words else "Bug"
+
+
+def _outside_code(text: str, i: int) -> bool:
+    """Whether position `i` is outside every `code` span (an even count before it)."""
+    return text.count("`", 0, i) % 2 == 0
+
+
+def _md(text: str) -> str:
+    """Escape `*` outside code spans and close a code span left open, so the
+    model's text (`*Task`, `**`) can't break the bold title or the paragraph."""
+    out = [
+        part if n % 2 else part.replace("*", "\\*")
+        for n, part in enumerate(text.split("`"))
+    ]
+    joined = "`".join(out)
+    return joined + "`" if text.count("`") % 2 else joined
+
+
+def _cut(text: str, limit: int) -> int:
+    """Where to cut `text` to at most `limit` chars: the last clause break, else
+    the last space, never inside a code span."""
+    clauses = [
+        m.end()
+        for m in _CLAUSE.finditer(text, 0, limit)
+        if m.end() >= _MIN_TITLE_CHARS and _outside_code(text, m.end())
+    ]
+    if clauses:
+        return clauses[-1]
+    spaces = [i for i in range(1, limit) if text[i] == " " and _outside_code(text, i)]
+    return spaces[-1] if spaces else limit - 1
+
+
+def _clip(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[: _cut(text, limit - 1)].rstrip(" ,;:—–-") + "…"
+
+
+def title_and_why(claim: str) -> tuple[str, str]:
+    """Split a claim into its first sentence (the title) and the rest (the why).
+
+    The why is "" for a one-sentence claim. A first sentence too long for a
+    title is cut at a clause break and its tail opens the why, so no text is
+    lost from the middle; only the why's end is clipped. Both are markdown-safe.
+    """
+    text = " ".join(claim.split())
+    head, rest = text, ""
+    for m in _SENTENCE_END.finditer(text):
+        if not _ABBREVIATION.search(text[: m.start()]):
+            head, rest = text[: m.start()], text[m.end() :]
+            break
+    semi = next(
+        (
+            m.start()
+            for m in re.finditer(r";\s", head)
+            if _MIN_TITLE_CHARS <= m.start() < MAX_TITLE_CHARS
+            and _outside_code(head, m.start())
+        ),
+        None,
+    )
+    if len(head) > MAX_TITLE_CHARS and semi is not None:
+        # "X is ignored; if it fails ..." reads as two sentences: split there.
+        tail = head[semi + 1 :].strip()
+        head = head[:semi] + "."
+        rest = tail[:1].upper() + tail[1:] + (" " + rest if rest else "")
+    elif len(head) > MAX_TITLE_CHARS:
+        i = _cut(head, MAX_TITLE_CHARS - 1)
+        tail = head[i:].lstrip(" ,;:—–-")
+        head = head[:i].rstrip(" ,;:—–-") + "…"
+        rest = "…" + tail + (" " + rest if rest else "")
+    return _md(head), _md(_clip(rest, MAX_WHY_CHARS))
+
+
+def _finding_md(rf: ReportFinding, where: str = "") -> str:
+    """Badge, bold title and why: the inline format, also used in the body."""
+    title, why = title_and_why(rf.finding.claim)
+    badge = f"🐛 **{category_label(rf.finding.category)}**"
+    parts = [badge + (f" · {where}" if where else ""), f"**{title}**"]
+    if why:
+        parts.append(why)
+    return "\n\n".join(parts)
+
+
 def comment_body(rf: ReportFinding) -> str:
-    claim = " ".join(rf.finding.claim.split())
-    if len(claim) > MAX_CLAIM_CHARS:
-        claim = claim[: MAX_CLAIM_CHARS - 1] + "…"
-    return f"**{rf.finding.category}**: {claim}\n\n{MARKER}"
+    return f"{_finding_md(rf)}\n\n{MARKER}"
 
 
 class LogRecord(BaseModel):
@@ -201,19 +316,50 @@ class Posted:
     review_id: int | None
 
 
-def _review_body(report: Report, outside: Sequence[ReportFinding]) -> str:
-    lines = [f"pr-review ({report.model}): {_count(report.findings)}."]
-    if outside:
-        lines += ["", "Outside the diff:"]
-        for rf in outside:
-            f = rf.finding
-            claim = comment_body(rf).removesuffix(f"\n\n{MARKER}")
-            lines.append(f"- `{f.file}:{f.lines.start}-{f.lines.end}` {claim}")
-    return "\n".join(lines + ["", MARKER])
+def _bugs(n: int) -> str:
+    return "1 possible bug" if n == 1 else f"{n} possible bugs"
 
 
-def _count(findings: Sequence[ReportFinding]) -> str:
-    return "1 finding" if len(findings) == 1 else f"{len(findings)} findings"
+def _link(rf: ReportFinding, *, server_url: str, repo: str, head_sha: str) -> str:
+    """`file:start-end`, linked to those lines at the head commit."""
+    f = rf.finding
+    lines = (
+        str(f.lines.start)
+        if f.lines.start == f.lines.end
+        else f"{f.lines.start}-{f.lines.end}"
+    )
+    anchor = (
+        f"L{f.lines.start}"
+        if f.lines.start == f.lines.end
+        else f"L{f.lines.start}-L{f.lines.end}"
+    )
+    url = f"{server_url.rstrip('/')}/{repo}/blob/{head_sha}/{f.file}#{anchor}"
+    return f"[`{f.file}:{lines}`]({url})"
+
+
+def review_body(
+    report: Report,
+    n_inline: int,
+    outside: Sequence[ReportFinding],
+    *,
+    server_url: str,
+    repo: str,
+    head_sha: str,
+) -> str:
+    """One count line, any findings that couldn't go inline, and a footer."""
+    total = n_inline + len(outside)
+    if not outside:
+        count = f"{_bugs(total)}, commented inline"
+    elif not n_inline:
+        count = f"{_bugs(total)}, outside the diff"
+    else:
+        count = f"{_bugs(total)}: {n_inline} commented inline, {len(outside)} outside the diff"
+    parts = [f"**pr-review** found {count}."]
+    for rf in outside:
+        link = _link(rf, server_url=server_url, repo=repo, head_sha=head_sha)
+        parts.append(_finding_md(rf, link))
+    parts += [f"<sub>{report.model} · ${report.cost_usd:.4f}</sub>", MARKER]
+    return "\n\n".join(parts)
 
 
 def post_report(
@@ -224,6 +370,7 @@ def post_report(
     repo: str,
     pr: int,
     head_sha: str,
+    server_url: str = DEFAULT_SERVER_URL,
 ) -> Posted:
     """Post one review with the report's findings. No findings: nothing is posted."""
     findings = [rf for rf in report.findings if not is_suppressed(rf.finding)]
@@ -250,9 +397,15 @@ def post_report(
         if a.start_line != a.line:
             c |= {"start_line": a.start_line, "start_side": "RIGHT"}
         comments.append(c)
-    review_id = gh.create_review(
-        repo, pr, head_sha, _review_body(report, outside), comments
+    body = review_body(
+        report,
+        len(inline),
+        outside,
+        server_url=server_url,
+        repo=repo,
+        head_sha=head_sha,
     )
+    review_id = gh.create_review(repo, pr, head_sha, body, comments)
     # Keyed by path and body: this endpoint returns `line: null` (seen on
     # GitHub, 2026-11-06), so the line can't be part of the match.
     ids: dict[tuple[str, str], list[int]] = {}

@@ -347,13 +347,16 @@ def test_post_makes_one_review_with_inline_comments_and_logs_them(
         "path": "store/load.go",
         "line": 6,
         "side": "RIGHT",
-        "body": f"**ignored_err**: {HIT['claim']}\n\n{MARKER}",
+        "body": f"🐛 **Ignored error**\n\n**{HIT['claim']}**\n\n{MARKER}",
     }
     # Lines 2-7 narrowed to the hunk's 4-9 overlap: a multi-line comment on 4-7.
     assert multi["start_line"] == 4 and multi["line"] == 7
     assert multi["start_side"] == "RIGHT"
     # The out-of-diff finding is in the body; the style finding is nowhere.
     assert "store/load.go:40-41" in body["body"] and "unrelated" in body["body"]
+    assert f"/KonMam/go-taskqueue/blob/{HEAD_SHA}/store/load.go#L40-L41" in body["body"]
+    assert "2 commented inline, 1 outside the diff" in body["body"]
+    assert "ignored_err" not in json.dumps(body)
     assert "rename f" not in json.dumps(body)
 
     records = read_log(tmp_path)

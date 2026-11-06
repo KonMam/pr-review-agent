@@ -141,13 +141,14 @@ runs:
         PR: ${{ github.event.pull_request.number }}
         HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         API_URL: ${{ github.api_url }}
+        SERVER_URL: ${{ github.server_url }}
       run: |
         set -euo pipefail
         work="$GITHUB_WORKSPACE/.pr-review"
         uv run --quiet --locked --project "$GITHUB_ACTION_PATH" pr-review post \
           --report "$work/report.json" --diff "$work/pr.diff" \
           --repo "$REPO" --pr "$PR" --head-sha "$HEAD_SHA" \
-          --log "$work/findings.jsonl" --api-url "$API_URL"
+          --log "$work/findings.jsonl" --api-url "$API_URL" --server-url "$SERVER_URL"
         echo "findings=$(wc -l < "$work/findings.jsonl" | tr -d ' ')" >> "$GITHUB_OUTPUT"
         {
           echo "### pr-review"

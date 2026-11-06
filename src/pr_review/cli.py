@@ -10,6 +10,7 @@ from pr_review.arms import ArmsError, load_arm
 from pr_review.evaluate import DEFAULT_CONCURRENCY, base_dir, run_eval
 from pr_review.github import (
     DEFAULT_API_URL,
+    DEFAULT_SERVER_URL,
     GitHub,
     GitHubError,
     post_report,
@@ -223,6 +224,11 @@ def main(argv: list[str] | None = None) -> int:
         "--log", type=Path, required=True, help="JSONL findings log to write"
     )
     po.add_argument("--api-url", default=DEFAULT_API_URL)
+    po.add_argument(
+        "--server-url",
+        default=DEFAULT_SERVER_URL,
+        help="web URL for links to lines outside the diff",
+    )
     args = parser.parse_args(argv)
 
     if args.command == "snapshot":
@@ -380,6 +386,7 @@ def _post(args: argparse.Namespace) -> int:
             repo=args.repo,
             pr=args.pr,
             head_sha=args.head_sha,
+            server_url=args.server_url,
         )
     except (GitHubError, ValueError) as e:
         write_log(args.log, [])
